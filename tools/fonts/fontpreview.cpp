@@ -114,7 +114,8 @@ static bool Render(const std::wstring& font, const std::wstring& out, const std:
     if (rtl) fmt->SetReadingDirection(DWRITE_READING_DIRECTION_RIGHT_TO_LEFT);
     const wchar_t* text = SampleFor(script);
     IDWriteTextLayout* lay = nullptr;
-    dw->CreateTextLayout(text, (UINT32)wcslen(text), fmt, W - 2 * Pad, H, &lay);
+    // the right edge stays clear for the card's Download button
+    dw->CreateTextLayout(text, (UINT32)wcslen(text), fmt, W - Pad - 64, H, &lay);
 
     IWICBitmap* bmp = nullptr;
     wic->CreateBitmap(W, H, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bmp);
