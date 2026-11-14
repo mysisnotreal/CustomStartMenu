@@ -1,58 +1,174 @@
-# Custom Start (CSM)
+<p align="center">
+  <img src="docs/images/banner.svg" width="100%" alt="Custom Start: a smooth, themeable command bar that replaces the Windows 11 Start menu">
+</p>
 
-A tray app that replaces the Windows 11 Start menu with a minimal, animated command bar.
+<p align="center">
+  <a href="https://github.com/mysisnotreal/CustomStartMenu/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/mysisnotreal/CustomStartMenu?style=flat-square&label=release&color=0A7CFF"></a>
+  <a href="https://github.com/mysisnotreal/CustomStartMenu/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/mysisnotreal/CustomStartMenu/total?style=flat-square&label=downloads&color=8C3CFA"></a>
+  <a href="https://github.com/mysisnotreal/CustomStartMenu/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/mysisnotreal/CustomStartMenu?style=flat-square&color=FF5AA0"></a>
+  <img alt="Windows 11" src="https://img.shields.io/badge/Windows-11-00BEC8?style=flat-square&logo=windows11&logoColor=white">
+  <img alt="C++ and Rust" src="https://img.shields.io/badge/C%2B%2B%20%2F%20Rust-native-3F6FB5?style=flat-square">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/mysisnotreal/CustomStartMenu?style=flat-square&color=5EE6A8"></a>
+</p>
 
-- Press the **Windows key**, **Ctrl+Esc**, or click the **Start button**. Windows shortcuts like Win+E and Win+R keep working.
-- Type to find any installed app. Enter opens the selected app, Shift+Enter runs the raw text, and Ctrl+Shift+Enter runs it as administrator. Text that isn't an app opens as a URL or a web search.
-- Type `>` to see the commands:
-  - `> theme` opens the theme picker.
-  - `> expanded` turns the list of matching apps under the bar on or off.
-  - `> startup` turns starting with Windows on or off.
-  - `> quit` closes Custom Start.
-- There are 8 themes: Dark, Light, Translucent, Glass, Midnight, Sunset, Mint and OLED.
+<p align="center">
+  <a href="https://github.com/mysisnotreal/CustomStartMenu/releases/latest/download/CSMInstaller.exe">
+    <img alt="Download for Windows" src="https://img.shields.io/badge/Download%20for%20Windows-CSMInstaller.exe-0A7CFF?style=for-the-badge&logo=windows11&logoColor=white">
+  </a>
+</p>
 
-## Install
+<p align="center">
+  <a href="#-features">Features</a> &nbsp;·&nbsp;
+  <a href="#-themes">Themes</a> &nbsp;·&nbsp;
+  <a href="#-setup">Setup</a> &nbsp;·&nbsp;
+  <a href="#%EF%B8%8F-shortcuts">Shortcuts</a> &nbsp;·&nbsp;
+  <a href="#-analytics">Analytics</a>
+</p>
 
-Download **CSMInstaller.exe** from the [latest release](https://github.com/mysisnotreal/CustomStartMenu/releases/latest) and run it. Setup then:
+<br>
 
-1. Greets you with an animated "hello" in your PC's language.
-2. Asks for your language.
-3. Asks which backend to use: **C++** (recommended) or **Rust**. Both have the same features.
-4. Downloads the build you chose from this repository's GitHub releases. It installs per user to `%LOCALAPPDATA%\Programs\CustomStartMenu`, so no administrator rights are needed.
+<p align="center">
+  <img src="docs/images/demo.png" width="880" alt="Custom Start opening, searching for apps and previewing themes">
+</p>
 
-Custom Start checks for updates every 6 hours. When a newer version is on GitHub, setup opens and shows **Update to V*x.y.z*?** with the changes: additions in green, removals in red.
+<br>
 
-You can uninstall from *Settings → Apps*, or by running setup again.
+## ✨ Features
 
-## Build from source
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/search.png" alt="Searching apps">
+      <h3>Instant app search</h3>
+      Press <kbd>Win</kbd> and start typing. Every installed app, including Store apps, shows up as you type, with its icon, matched letters in bold, and an inline completion you can accept with <kbd>Tab</kbd>.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/commands.png" alt="Commands">
+      <h3>Commands with <code>&gt;</code></h3>
+      Type <code>&gt;</code> to switch theme, turn the results list on or off, start with Windows, or quit. No settings window needed.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/themes.png" alt="Theme picker">
+      <h3>Live theme picker</h3>
+      <code>&gt; theme</code> opens a grid of live previews. Arrow keys cross-fade the whole bar into each theme, and <kbd>Enter</kbd> applies it.
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/bar.png" alt="The command bar">
+      <h3>Smooth all the way</h3>
+      The bar springs open, the caret glides, freshly typed letters fade in, and a frosted, edge-faded backdrop blurs whatever is behind it. Rendered with Direct2D at your display's refresh rate.
+    </td>
+  </tr>
+</table>
 
-You need Visual Studio 2022 with *Desktop development with C++*. The Rust backend also needs a stable Rust toolchain (MSVC). Then run:
+- **Replaces the Start menu.** <kbd>Win</kbd>, <kbd>Ctrl</kbd>+<kbd>Esc</kbd> and the Start button all open Custom Start, while shortcuts like <kbd>Win</kbd>+<kbd>E</kbd> and <kbd>Win</kbd>+<kbd>R</kbd> keep working.
+- **More than apps.** Type a path, a command or a URL and it runs or opens. Anything else becomes a web search.
+- **Two native backends.** Pick **C++** or **Rust** when you install. Both look and behave the same.
+- **Speaks your language.** English, Español, Français, Deutsch, Italiano, Português, Русский, 日本語, 中文 and 한국어.
+- **Stays up to date.** New versions show up on their own, with a clear list of what changed.
 
-```bat
-build.bat
-```
+## 🎨 Themes
 
-This writes `dist\CSM-cpp.exe`, `dist\CSM-rust.exe` and `dist\CSMInstaller.exe`.
+Eight built-in themes: **Dark**, **Light**, **Translucent**, **Glass**, **Midnight**, **Sunset**, **Mint** and **OLED**.
 
-| Folder | What it is |
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/theme-dark.png" alt="Dark theme"><p align="center"><b>Dark</b></p></td>
+    <td width="50%"><img src="docs/images/theme-light.png" alt="Light theme"><p align="center"><b>Light</b></p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/theme-midnight.png" alt="Midnight theme"><p align="center"><b>Midnight</b></p></td>
+    <td width="50%"><img src="docs/images/theme-sunset.png" alt="Sunset theme"><p align="center"><b>Sunset</b></p></td>
+  </tr>
+</table>
+
+## 🚀 Setup
+
+Download **[CSMInstaller.exe](https://github.com/mysisnotreal/CustomStartMenu/releases/latest/download/CSMInstaller.exe)** and run it. No admin rights needed.
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/images/setup-hello.png" alt="Hello screen"><p align="center"><b>1.</b> A hand-drawn hello in your PC's language</p></td>
+    <td width="50%" valign="top"><img src="docs/images/setup-language.png" alt="Language selection"><p align="center"><b>2.</b> Pick your language</p></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/images/setup-backend.png" alt="Backend selection"><p align="center"><b>3.</b> Choose the C++ or Rust backend</p></td>
+    <td width="50%" valign="top"><img src="docs/images/setup-update.png" alt="Update prompt"><p align="center"><b>Later:</b> updates arrive with a changelog</p></td>
+  </tr>
+</table>
+
+Uninstall any time from **Settings → Apps**.
+
+## ⌨️ Shortcuts
+
+| Key | Action |
 | --- | --- |
-| `cpp/` | C++ backend: Win32, Direct2D, DirectWrite |
-| `rust/` | Rust backend: a feature-for-feature port using the `windows` crate |
-| `installer/` | CSMInstaller: setup, updater and uninstaller |
-| `assets/` | Icon |
-| `manifest.json` | What the installer reads: latest version, release asset names and the changelog |
+| <kbd>Win</kbd> · <kbd>Ctrl</kbd>+<kbd>Esc</kbd> · Start button | Open or close Custom Start |
+| <kbd>Enter</kbd> | Open the selected app |
+| <kbd>Shift</kbd>+<kbd>Enter</kbd> | Run exactly what you typed |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> | Run as administrator |
+| <kbd>Tab</kbd> · <kbd>→</kbd> | Accept the completion |
+| <kbd>↑</kbd> <kbd>↓</kbd> | Move through results |
+| <kbd>Esc</kbd> | Close |
+| `> theme` · `> expanded` · `> startup` · `> quit` | Commands |
 
-## Publishing an update
+## 📊 Analytics
 
-1. Bump the version in `manifest.json` and add a `releases` entry with the `added` and `removed` lists.
-2. Build, then create the GitHub release `v<version>` with the three executables attached:
+<table>
+  <tr>
+    <td><b>Downloads</b></td>
+    <td>
+      <img alt="Total downloads" src="https://img.shields.io/github/downloads/mysisnotreal/CustomStartMenu/total?style=flat-square&label=all%20time&color=8C3CFA">
+      <img alt="Latest release downloads" src="https://img.shields.io/github/downloads/mysisnotreal/CustomStartMenu/latest/total?style=flat-square&label=latest%20release&color=8C3CFA">
+    </td>
+  </tr>
+  <tr>
+    <td><b>By file</b></td>
+    <td>
+      <img alt="Installer downloads" src="https://img.shields.io/github/downloads/mysisnotreal/CustomStartMenu/latest/CSMInstaller.exe?style=flat-square&label=installer&color=0A7CFF">
+      <img alt="C++ backend downloads" src="https://img.shields.io/github/downloads/mysisnotreal/CustomStartMenu/latest/CSM-cpp.exe?style=flat-square&label=C%2B%2B%20backend&color=3F6FB5">
+      <img alt="Rust backend downloads" src="https://img.shields.io/github/downloads/mysisnotreal/CustomStartMenu/latest/CSM-rust.exe?style=flat-square&label=Rust%20backend&color=B7410E">
+    </td>
+  </tr>
+  <tr>
+    <td><b>Community</b></td>
+    <td>
+      <img alt="Stars" src="https://img.shields.io/github/stars/mysisnotreal/CustomStartMenu?style=flat-square&color=FF5AA0">
+      <img alt="Forks" src="https://img.shields.io/github/forks/mysisnotreal/CustomStartMenu?style=flat-square&color=FF5AA0">
+      <img alt="Watchers" src="https://img.shields.io/github/watchers/mysisnotreal/CustomStartMenu?style=flat-square&color=FF5AA0">
+      <img alt="Page views" src="https://hits.sh/github.com/mysisnotreal/CustomStartMenu.svg?style=flat-square&label=views&color=FF5AA0">
+    </td>
+  </tr>
+  <tr>
+    <td><b>Activity</b></td>
+    <td>
+      <img alt="Last commit" src="https://img.shields.io/github/last-commit/mysisnotreal/CustomStartMenu?style=flat-square&color=00BEC8">
+      <img alt="Commit activity" src="https://img.shields.io/github/commit-activity/m/mysisnotreal/CustomStartMenu?style=flat-square&color=00BEC8">
+      <img alt="Open issues" src="https://img.shields.io/github/issues/mysisnotreal/CustomStartMenu?style=flat-square&color=00BEC8">
+    </td>
+  </tr>
+  <tr>
+    <td><b>Code</b></td>
+    <td>
+      <img alt="Top language" src="https://img.shields.io/github/languages/top/mysisnotreal/CustomStartMenu?style=flat-square&color=5EE6A8">
+      <img alt="Code size" src="https://img.shields.io/github/languages/code-size/mysisnotreal/CustomStartMenu?style=flat-square&color=5EE6A8">
+      <img alt="Repo size" src="https://img.shields.io/github/repo-size/mysisnotreal/CustomStartMenu?style=flat-square&color=5EE6A8">
+    </td>
+  </tr>
+</table>
 
-   ```bat
-   gh release create v1.1.0 dist\CSM-cpp.exe dist\CSM-rust.exe dist\CSMInstaller.exe
-   ```
+<p align="center">
+  <a href="https://star-history.com/#mysisnotreal/CustomStartMenu&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=mysisnotreal/CustomStartMenu&type=Date&theme=dark">
+      <img alt="Star history" src="https://api.star-history.com/svg?repos=mysisnotreal/CustomStartMenu&type=Date" width="720">
+    </picture>
+  </a>
+</p>
 
-3. Push `manifest.json`. Installed copies pick up the update on their next check.
+## 📄 License
 
-## License
+[MIT](LICENSE). The hand-drawn "hello" in Setup comes from [Apple OOBE hello](https://codepen.io/steefmaster/pen/MWvdyGb) on CodePen (MIT).
 
-MIT. The installer's "hello" lettering path comes from the CodePen [Apple OOBE hello](https://codepen.io/steefmaster/pen/MWvdyGb) (MIT).
+<p align="center"><sub>Made for Windows 11 · If you like it, leave a ⭐</sub></p>
