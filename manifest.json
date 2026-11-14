@@ -1,11 +1,21 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "assets": {
     "cpp": "CSM-cpp.exe",
     "rust": "CSM-rust.exe",
     "installer": "CSMInstaller.exe"
   },
   "releases": [
+    {
+      "version": "1.1.0",
+      "added": [
+        "Hardware acceleration option in Setup (on by default): Custom Start draws on your graphics card",
+        "Game mode: Custom Start steps out of the way while a game or other fullscreen app is running",
+        "Mouse and keyboard handling runs on its own high-priority thread, so it never adds input lag",
+        "Update prompts wait until you finish playing"
+      ],
+      "removed": []
+    },
     {
       "version": "1.0.0",
       "added": [

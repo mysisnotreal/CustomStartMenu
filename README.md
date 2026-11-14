@@ -64,6 +64,7 @@
 
 - **Replaces the Start menu.** <kbd>Win</kbd>, <kbd>Ctrl</kbd>+<kbd>Esc</kbd> and the Start button all open Custom Start, while shortcuts like <kbd>Win</kbd>+<kbd>E</kbd> and <kbd>Win</kbd>+<kbd>R</kbd> keep working.
 - **More than apps.** Type a path, a command or a URL and it runs or opens. Anything else becomes a web search.
+- **Stays out of your games.** Hardware acceleration (on by default) draws the bar on your graphics card. While a game or other fullscreen app is in front, Custom Start stops watching the mouse and holds update prompts until you're done.
 - **Two native backends.** Pick **C++** or **Rust** when you install. Both look and behave the same.
 - **Speaks your language.** English, Español, Français, Deutsch, Italiano, Português, Русский, 日本語, 中文 and 한국어.
 - **Stays up to date.** New versions show up on their own, with a clear list of what changed.
@@ -94,7 +95,10 @@ Download **[CSMInstaller.exe](https://github.com/mysisnotreal/CustomStartMenu/re
   </tr>
   <tr>
     <td width="50%" valign="top"><img src="docs/images/setup-backend.png" alt="Backend selection"><p align="center"><b>3.</b> Choose the C++ or Rust backend</p></td>
-    <td width="50%" valign="top"><img src="docs/images/setup-update.png" alt="Update prompt"><p align="center"><b>Later:</b> updates arrive with a changelog</p></td>
+    <td width="50%" valign="top"><img src="docs/images/setup-performance.png" alt="Hardware acceleration"><p align="center"><b>4.</b> Hardware acceleration, on by default</p></td>
+  </tr>
+  <tr>
+    <td valign="top" colspan="2" align="center"><img src="docs/images/setup-update.png" alt="Update prompt" width="50%"><p align="center"><b>Later:</b> updates arrive with a changelog</p></td>
   </tr>
 </table>
 

@@ -15,17 +15,21 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::mem::{size_of, ManuallyDrop};
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering::*};
 use std::sync::{Condvar, Mutex, RwLock};
 
-use windows::core::{w, HSTRING, PCWSTR, PWSTR, VARIANT};
+use windows::core::{w, Interface, HSTRING, PCWSTR, PWSTR, VARIANT};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
+use windows::Win32::Graphics::Direct3D::*;
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::DwmFlush;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::*;
@@ -426,7 +430,17 @@ struct IconCache {
 static ICONS: Mutex<Option<IconCache>> = Mutex::new(None);
 static ICON_CV: Condvar = Condvar::new();
 
-// keyboard / mouse hook state (hooks run on the UI thread, while it pumps messages)
+// Keyboard / mouse hook state. The hooks run on their own high-priority thread so that input
+// never waits on the UI thread, and only read these atomics. The mouse hook is removed
+// entirely while a game or other fullscreen app is in front (unless the bar is open).
+const WM_HOOK_SYNC: u32 = WM_APP + 20;
+static HOOK_TID: AtomicU32 = AtomicU32::new(0);
+static BAR_OPEN: AtomicBool = AtomicBool::new(false);
+static FULLSCREEN: AtomicBool = AtomicBool::new(false);
+static BOX_L: AtomicI32 = AtomicI32::new(0);
+static BOX_T: AtomicI32 = AtomicI32::new(0);
+static BOX_R: AtomicI32 = AtomicI32::new(0);
+static BOX_B: AtomicI32 = AtomicI32::new(0);
 static INTERCEPT: AtomicBool = AtomicBool::new(true);
 static WIN_DOWN: AtomicBool = AtomicBool::new(false);
 static WIN_EMITTED: AtomicBool = AtomicBool::new(false);
@@ -440,7 +454,7 @@ static WIN_LAST_TIME: AtomicU32 = AtomicU32::new(0);
 // UI-thread state
 // ---------------------------------------------------------------------------
 struct State {
-    d2d: ID2D1Factory,
+    d2d: ID2D1Factory1,
     dw: IDWriteFactory,
     fmt_text: IDWriteTextFormat,
     fmt_hint: IDWriteTextFormat,
@@ -451,7 +465,21 @@ struct State {
     fmt_card: IDWriteTextFormat,
     placeholder_layout: Option<IDWriteTextLayout>,
 
-    rt: Option<ID2D1DCRenderTarget>,
+    // Rendering backends. Hardware acceleration (the default, chosen in Setup) draws on the
+    // GPU into a DirectComposition swap chain, so nothing is copied back to the CPU. Without
+    // it, Direct2D renders in software into a layered window and never touches the GPU.
+    hw: bool,
+    rt: Option<ID2D1RenderTarget>, // the active target
+    dcrt: Option<ID2D1DCRenderTarget>,
+    d3d: Option<ID3D11Device>,
+    d2d_dev: Option<ID2D1Device>,
+    ctx: Option<ID2D1DeviceContext>,
+    swap: Option<IDXGISwapChain1>,
+    target: Option<ID2D1Bitmap1>,
+    dcomp: Option<IDCompositionDevice>,
+    dc_target: Option<IDCompositionTarget>,
+    dc_visual: Option<IDCompositionVisual>,
+    win_h: i32,
     solid: Option<ID2D1SolidColorBrush>,
     logo_brush: Option<ID2D1LinearGradientBrush>,
     shadow_bmp: Option<ID2D1Bitmap>,
@@ -535,7 +563,7 @@ static mut ST: *mut State = null_mut();
 fn st() -> &'static mut State {
     unsafe { &mut *ST }
 }
-fn rt() -> &'static ID2D1DCRenderTarget {
+fn rt() -> &'static ID2D1RenderTarget {
     st().rt.as_ref().unwrap()
 }
 fn solid() -> &'static ID2D1SolidColorBrush {
@@ -798,6 +826,7 @@ fn load_icon_pixels(target: &str, size: i32) -> Option<(Vec<u32>, i32, i32)> {
 
 fn icon_worker() {
     unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     loop {
@@ -1030,16 +1059,62 @@ unsafe extern "system" fn enum_taskbars(h: HWND, lp: LPARAM) -> BOOL {
     TRUE
 }
 
+// A game or other fullscreen app is in front (exclusive or borderless fullscreen).
+fn foreground_is_fullscreen() -> bool {
+    unsafe {
+        if let Ok(qs) = SHQueryUserNotificationState() {
+            if qs == QUNS_RUNNING_D3D_FULL_SCREEN || qs == QUNS_BUSY || qs == QUNS_PRESENTATION_MODE {
+                return true;
+            }
+        }
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || fg == hwnd() || fg == GetShellWindow() || fg == GetDesktopWindow() {
+            return false;
+        }
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(fg, &mut cls) as usize;
+        let name = String::from_utf16_lossy(&cls[..n]);
+        if matches!(name.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return false;
+        }
+        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+        if style & WS_CAPTION.0 == WS_CAPTION.0 {
+            return false; // a normal maximized window
+        }
+        let mut r = RECT::default();
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetWindowRect(fg, &mut r).is_err() || !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+// Background watcher: notices games / fullscreen apps once a second, and (only when none is
+// running) refreshes where the Start button is.
 fn start_button_thread() {
     unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let uia: Option<IUIAutomation> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok();
         let cond = uia.as_ref().and_then(|u| {
             let v = VARIANT::from(windows::core::BSTR::from("StartButton"));
             u.CreatePropertyCondition(UIA_AutomationIdPropertyId, &v).ok()
         });
-        if let (Some(uia), Some(cond)) = (&uia, &cond) {
-            loop {
+        let mut since_query = 1000;
+        loop {
+            let fs = foreground_is_fullscreen();
+            if fs != FULLSCREEN.load(Relaxed) {
+                FULLSCREEN.store(fs, Relaxed);
+                post_hook_sync();
+                if !fs {
+                    since_query = 1000; // the taskbar may have moved meanwhile
+                }
+            }
+            since_query += 1;
+            if let (false, Some(uia), Some(cond), true) = (fs, &uia, &cond, since_query >= 3) {
+                since_query = 0;
                 let mut bars: Vec<isize> = Vec::new();
                 let _ = EnumWindows(Some(enum_taskbars), LPARAM(&mut bars as *mut _ as isize));
                 let mut rects = Vec::new();
@@ -1055,10 +1130,10 @@ fn start_button_thread() {
                     }
                 }
                 *START_RECTS.write().unwrap() = rects;
-                let ev = HANDLE(QUIT_EVENT.load(Relaxed) as *mut c_void);
-                if WaitForSingleObject(ev, 2500) != WAIT_TIMEOUT {
-                    break;
-                }
+            }
+            let ev = HANDLE(QUIT_EVENT.load(Relaxed) as *mut c_void);
+            if WaitForSingleObject(ev, 1000) != WAIT_TIMEOUT {
+                break;
             }
         }
         drop(cond);
@@ -1161,16 +1236,36 @@ unsafe extern "system" fn kbd_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
     CallNextHookEx(HHOOK::default(), code, wp, lp)
 }
 
-fn container_screen_rect() -> RECT {
+// Called on the UI thread whenever the bar moves or resizes.
+fn publish_box() {
     let s = st();
     let sc = s.dpi / 96.0;
     let left = s.win_pos.x + (MARGIN * sc) as i32;
     let top = s.win_pos.y + (MARGIN * sc) as i32;
-    RECT { left, top, right: left + (BAR_W * sc) as i32, bottom: top + ((BAR_H + s.panel_h) * sc) as i32 }
+    BOX_L.store(left, Relaxed);
+    BOX_T.store(top, Relaxed);
+    BOX_R.store(left + (BAR_W * sc) as i32, Relaxed);
+    BOX_B.store(top + ((BAR_H + s.panel_h) * sc) as i32, Relaxed);
+}
+
+fn post_hook_sync() {
+    let tid = HOOK_TID.load(Relaxed);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_HOOK_SYNC, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+fn set_bar_open(open: bool) {
+    if BAR_OPEN.swap(open, Relaxed) != open {
+        post_hook_sync();
+    }
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && !ST.is_null() {
+    // Moves are the hot path: let them straight through.
+    if code == HC_ACTION as i32 && wp.0 as u32 != WM_MOUSEMOVE {
         let m = &*(lp.0 as *const MSLLHOOKSTRUCT);
         if m.flags & 1 == 0 {
             // not injected
@@ -1185,8 +1280,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
                 return LRESULT(1);
             }
             // Clicking anywhere outside the bar closes it (even if focus could not be taken).
-            if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN) && st().visible && st().anim_to > 0.5 {
-                let r = container_screen_rect();
+            if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN) && BAR_OPEN.load(Relaxed) {
+                let r = RECT { left: BOX_L.load(Relaxed), top: BOX_T.load(Relaxed), right: BOX_R.load(Relaxed), bottom: BOX_B.load(Relaxed) };
                 if !pt_in(&r, m.pt) {
                     let _ = PostMessageW(hwnd(), WM_APP_HIDE, WPARAM(0), LPARAM(0));
                 }
@@ -1194,6 +1289,47 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
         }
     }
     CallNextHookEx(HHOOK::default(), code, wp, lp)
+}
+
+// Owns both low-level hooks. Runs at time-critical priority and does almost nothing else, so
+// a busy CPU (a game, a compile) never makes the mouse or keyboard wait on Custom Start.
+fn sync_mouse_hook(ms: &mut Option<HHOOK>, inst: HINSTANCE) {
+    let want = !FULLSCREEN.load(Relaxed) || BAR_OPEN.load(Relaxed);
+    unsafe {
+        if want && ms.is_none() {
+            *ms = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), inst, 0).ok();
+        } else if !want {
+            if let Some(h) = ms.take() {
+                let _ = UnhookWindowsHookEx(h);
+                SWALLOW_CLICK_UP.store(false, Relaxed);
+            }
+        }
+    }
+}
+
+fn hook_thread(ready: std::sync::mpsc::Sender<()>) {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        let mut msg = MSG::default();
+        let _ = PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE); // create the message queue
+        HOOK_TID.store(GetCurrentThreadId(), Relaxed);
+        let inst: HINSTANCE = GetModuleHandleW(PCWSTR::null()).map(|m| HINSTANCE(m.0)).unwrap_or_default();
+        let kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), inst, 0).ok();
+        let mut ms: Option<HHOOK> = None;
+        sync_mouse_hook(&mut ms, inst);
+        let _ = ready.send(());
+        while GetMessageW(&mut msg, HWND::default(), 0, 0).0 > 0 {
+            if msg.message == WM_HOOK_SYNC {
+                sync_mouse_hook(&mut ms, inst);
+            }
+        }
+        if let Some(h) = ms {
+            let _ = UnhookWindowsHookEx(h);
+        }
+        if let Some(h) = kb {
+            let _ = UnhookWindowsHookEx(h);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1395,104 @@ fn discard_device_resources() {
     s.shadow_dpi = 0.0;
     s.icon_bmps.clear();
     s.rt = None;
+    s.dcrt = None;
+    if let Some(ctx) = &s.ctx {
+        unsafe { ctx.SetTarget(None::<&ID2D1Image>) };
+    }
+    s.target = None;
+    s.ctx = None;
+    s.d2d_dev = None;
+    s.dc_visual = None;
+    s.dc_target = None;
+    s.dcomp = None;
+    s.swap = None;
+    s.d3d = None;
+}
+
+fn create_d3d_device() -> Option<ID3D11Device> {
+    for t in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+        let mut dev: Option<ID3D11Device> = None;
+        let ok = unsafe {
+            D3D11CreateDevice(
+                None::<&IDXGIAdapter>,
+                t,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut dev),
+                None,
+                None,
+            )
+        };
+        if ok.is_ok() && dev.is_some() {
+            return dev;
+        }
+    }
+    None
+}
+
+fn bind_swap_target() -> bool {
+    let s = st();
+    let (Some(swap), Some(ctx)) = (&s.swap, &s.ctx) else { return false };
+    unsafe {
+        let Ok(surf) = swap.GetBuffer::<IDXGISurface>(0) else { return false };
+        let bp = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: pixel_format(),
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            colorContext: ManuallyDrop::new(None),
+        };
+        let Ok(bmp) = ctx.CreateBitmapFromDxgiSurface(&surf, Some(&bp)) else { return false };
+        ctx.SetTarget(&bmp);
+        ctx.SetDpi(s.dpi, s.dpi);
+        s.target = Some(bmp);
+    }
+    true
+}
+
+fn create_gpu_target() -> windows::core::Result<()> {
+    let s = st();
+    let d3d = create_d3d_device().ok_or(windows::core::Error::from(E_FAIL))?;
+    unsafe {
+        let dxgi: IDXGIDevice1 = d3d.cast()?;
+        let _ = dxgi.SetMaximumFrameLatency(1); // Present(1) then paces us at the display's refresh rate
+        let dev = s.d2d.CreateDevice(&dxgi)?;
+        let ctx = dev.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+        let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: s.px_w as u32,
+            Height: s.px_h as u32,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+            ..Default::default()
+        };
+        let swap = factory.CreateSwapChainForComposition(&d3d, &desc, None::<&IDXGIOutput>)?;
+        let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
+        let target = dcomp.CreateTargetForHwnd(hwnd(), TRUE)?;
+        let visual = dcomp.CreateVisual()?;
+        visual.SetContent(&swap)?;
+        target.SetRoot(&visual)?;
+        dcomp.Commit()?;
+        s.d3d = Some(d3d);
+        s.d2d_dev = Some(dev);
+        s.ctx = Some(ctx.clone());
+        s.swap = Some(swap);
+        s.dcomp = Some(dcomp);
+        s.dc_target = Some(target);
+        s.dc_visual = Some(visual);
+        if !bind_swap_target() {
+            return Err(E_FAIL.into());
+        }
+        s.rt = Some(ctx.cast()?);
+    }
+    Ok(())
 }
 
 fn create_device_resources() -> bool {
@@ -1267,15 +1501,26 @@ fn create_device_resources() -> bool {
         return true;
     }
     unsafe {
-        let props = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            pixelFormat: pixel_format(),
-            dpiX: 0.0,
-            dpiY: 0.0,
-            usage: D2D1_RENDER_TARGET_USAGE_NONE,
-            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-        };
-        let Ok(rt) = s.d2d.CreateDCRenderTarget(&props) else { return false };
+        if s.hw {
+            if create_gpu_target().is_err() {
+                discard_device_resources();
+                return false;
+            }
+        } else {
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                pixelFormat: pixel_format(),
+                dpiX: 0.0,
+                dpiY: 0.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let Ok(dcrt) = s.d2d.CreateDCRenderTarget(&props) else { return false };
+            let Ok(base) = dcrt.cast::<ID2D1RenderTarget>() else { return false };
+            s.dcrt = Some(dcrt);
+            s.rt = Some(base);
+        }
+        let rt = s.rt.clone().unwrap();
         rt.SetDpi(s.dpi, s.dpi);
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         s.solid = rt.CreateSolidColorBrush(&c(0, 1.0), None).ok();
@@ -1357,6 +1602,24 @@ fn build_shadow() {
 
 fn ensure_surface(w: i32, h: i32) {
     let s = st();
+    if s.hw {
+        if w == s.px_w && h == s.px_h {
+            return;
+        }
+        s.px_w = w;
+        s.px_h = h;
+        if let (Some(swap), Some(ctx)) = (s.swap.clone(), s.ctx.clone()) {
+            unsafe {
+                ctx.SetTarget(None::<&ID2D1Image>);
+                s.target = None;
+                let ok = swap.ResizeBuffers(0, w as u32, h as u32, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).is_ok();
+                if !ok || !bind_swap_target() {
+                    discard_device_resources();
+                }
+            }
+        }
+        return;
+    }
     if !s.dib.is_invalid() && w == s.px_w && h == s.px_h {
         return;
     }
@@ -1410,6 +1673,7 @@ fn position_on_monitor() {
         let bar_center_y = wa.top + ((wa.bottom - wa.top) as f32 * VERTICAL_POS).round() as i32;
         s.win_pos.x = (wa.left + wa.right) / 2 - w / 2;
         s.win_pos.y = bar_center_y - ((MARGIN + BAR_H / 2.0) * sc).round() as i32;
+        s.win_h = -1; // hardware path: move/resize the window on the next frame
     }
 }
 
@@ -1984,7 +2248,7 @@ fn draw_panel(t_now: f64, dt: f32) {
 
 fn render() {
     let s = st();
-    if s.dib.is_invalid() || !create_device_resources() {
+    if s.px_w == 0 || !create_device_resources() {
         return;
     }
     let t_now = now();
@@ -1997,6 +2261,7 @@ fn render() {
     if p >= 1.0 && s.anim_to < 0.5 {
         s.anim = 0.0;
         s.visible = false;
+        set_bar_open(false);
         unsafe {
             let _ = ShowWindow(hwnd(), SW_HIDE);
         }
@@ -2026,13 +2291,29 @@ fn render() {
     ensure_backdrop_brush();
 
     unsafe {
-        let rc = RECT { left: 0, top: 0, right: s.px_w, bottom: s.px_h };
-        if rt().BindDC(s.mem_dc, &rc).is_err() {
-            return;
+        if let Some(dcrt) = &s.dcrt {
+            let rc = RECT { left: 0, top: 0, right: s.px_w, bottom: s.px_h };
+            if dcrt.BindDC(s.mem_dc, &rc).is_err() {
+                return;
+            }
         }
         rt().BeginDraw();
         set_transform(&m_identity());
         rt().Clear(Some(&c(0, 0.0)));
+        // The layered window fades through its constant alpha; the swap chain fades through a layer.
+        let fade_layer = s.hw && s.anim < 0.999;
+        if fade_layer {
+            let lp = D2D1_LAYER_PARAMETERS {
+                contentBounds: rect(-f32::MAX, -f32::MAX, f32::MAX, f32::MAX),
+                geometricMask: ManuallyDrop::new(None),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: m_identity(),
+                opacity: s.anim.clamp(0.0, 1.0) as f32,
+                opacityBrush: ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            rt().PushLayer(&lp, None::<&ID2D1Layer>);
+        }
 
         let a = s.anim as f32;
         let sc = 0.94 + 0.06 * a;
@@ -2058,6 +2339,10 @@ fn render() {
         }
         draw_text_area(t_now, dt);
 
+        if fade_layer {
+            set_transform(&m_identity());
+            rt().PopLayer();
+        }
         if let Err(e) = rt().EndDraw(None, None) {
             if e.code() == D2DERR_RECREATE_TARGET {
                 discard_device_resources();
@@ -2067,6 +2352,21 @@ fn render() {
 
         let scale = s.dpi / 96.0;
         let cur_h = s.px_h.min(((MARGIN * 2.0 + BAR_H + s.panel_h) * scale).ceil() as i32);
+        publish_box();
+        if s.hw {
+            // The window follows the panel's height so the empty space below never catches clicks.
+            if cur_h != s.win_h {
+                let _ = SetWindowPos(hwnd(), HWND::default(), s.win_pos.x, s.win_pos.y, s.px_w, cur_h, SWP_NOZORDER | SWP_NOACTIVATE);
+                s.win_h = cur_h;
+            }
+            if let Some(swap) = &s.swap {
+                let hr = swap.Present(1, DXGI_PRESENT(0));
+                if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
+                    discard_device_resources();
+                }
+            }
+            return;
+        }
         let bf = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
@@ -2135,6 +2435,8 @@ fn show() {
     }
     start_anim(1.0, 0.32);
     s.visible = true;
+    publish_box();
+    set_bar_open(true);
     s.last_frame = now();
     s.last_input = s.last_frame;
     render();
@@ -2151,6 +2453,7 @@ fn hide() {
         return;
     }
     start_anim(0.0, 0.18);
+    set_bar_open(false);
     s.last_hide_time = now();
     unsafe {
         if GetCapture() == hwnd() {
@@ -2786,7 +3089,12 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_TIMER => {
             if wp.0 == TIMER_UPDATE_CHECK {
                 // Ask Setup (installed next to us) whether GitHub has a newer version; it stays
-                // hidden unless there is one, then shows "Update to V<x>?".
+                // hidden unless there is one, then shows "Update to V<x>?". Never in the middle
+                // of a game: wait until nothing is fullscreen.
+                if FULLSCREEN.load(Relaxed) || foreground_is_fullscreen() {
+                    SetTimer(h, TIMER_UPDATE_CHECK, 5 * 60 * 1000, None);
+                    return LRESULT(0);
+                }
                 SetTimer(h, TIMER_UPDATE_CHECK, 6 * 60 * 60 * 1000, None);
                 if let Ok(exe) = std::env::current_exe() {
                     let setup = exe.with_file_name("CSMInstaller.exe");
@@ -2910,7 +3218,7 @@ fn main() {
         let _ = QueryPerformanceFrequency(&mut f);
         QPF = f as f64;
 
-        let d2d: ID2D1Factory = match D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) {
+        let d2d: ID2D1Factory1 = match D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) {
             Ok(f) => f,
             Err(_) => {
                 MessageBoxW(HWND::default(), w!("Direct2D / DirectWrite unavailable."), w!("Custom Start"), MB_ICONERROR);
@@ -2937,6 +3245,9 @@ fn main() {
         let placeholder_layout = dw.CreateTextLayout(&ws(placeholder), &fmt_text, 10000.0, BAR_H).ok();
 
         let theme_idx = (read_dword("Theme", 0) as usize).min(THEME_COUNT - 1);
+        // Hardware acceleration (Setup asks; on by default). Falls back to software if there
+        // is no usable Direct3D 11 device at all.
+        let hw = read_dword("HardwareAcceleration", 1) != 0 && create_d3d_device().is_some();
         let state = Box::new(State {
             fmt_hint: make_format(&dw, fam, HINT_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, true),
             fmt_row: make_format(&dw, fam, 14.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
@@ -2948,7 +3259,18 @@ fn main() {
             placeholder_layout,
             d2d,
             dw,
+            hw,
             rt: None,
+            dcrt: None,
+            d3d: None,
+            d2d_dev: None,
+            ctx: None,
+            swap: None,
+            target: None,
+            dcomp: None,
+            dc_target: None,
+            dc_visual: None,
+            win_h: -1,
             solid: None,
             logo_brush: None,
             shadow_bmp: None,
@@ -3037,8 +3359,9 @@ fn main() {
         };
         RegisterClassExW(&wc);
 
+        let ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if hw { WS_EX_NOREDIRECTIONBITMAP } else { WS_EX_LAYERED };
         let Ok(h) = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            ex_style,
             CLASS_NAME,
             w!("Custom Start"),
             WS_POPUP,
@@ -3059,8 +3382,9 @@ fn main() {
         add_tray_icon();
         SetTimer(h, TIMER_UPDATE_CHECK, 20 * 1000, None);
 
-        let kb_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), inst, 0).ok();
-        let ms_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), inst, 0).ok();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let hook_thread = std::thread::spawn(move || hook_thread(ready_tx));
+        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(2));
 
         let quit_event = CreateEventW(None, TRUE, FALSE, PCWSTR::null()).unwrap_or_default();
         QUIT_EVENT.store(quit_event.0 as isize, Relaxed);
@@ -3081,8 +3405,11 @@ fn main() {
                     DispatchMessageW(&msg);
                 }
                 if st().visible {
+                    // The swap chain's Present(1) already waits for the next refresh; the layered
+                    // window (or a Present that returned early) waits on the compositor instead.
+                    let t0 = now();
                     render();
-                    if DwmFlush().is_err() {
+                    if (!st().hw || now() - t0 < 0.004) && DwmFlush().is_err() {
                         std::thread::sleep(std::time::Duration::from_millis(8));
                     }
                 }
@@ -3107,11 +3434,10 @@ fn main() {
         while !uia_thread.is_finished() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        if let Some(k) = kb_hook {
-            let _ = UnhookWindowsHookEx(k);
-        }
-        if let Some(m) = ms_hook {
-            let _ = UnhookWindowsHookEx(m);
+        let tid = HOOK_TID.load(Relaxed);
+        if tid != 0 {
+            let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+            let _ = hook_thread.join();
         }
         remove_tray_icon();
         discard_device_resources();

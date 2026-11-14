@@ -76,7 +76,8 @@ enum Str {
     S_INSTALL, S_INSTALLING, S_DOWNLOADING, S_FINISHING, S_DONE_TITLE, S_DONE_SUB, S_FINISH, S_UPDATE_TITLE,
     S_UPDATE_SUB, S_UPDATE, S_NOT_NOW, S_UPTODATE, S_VERSION_LINE, S_MODIFY, S_UNINSTALL, S_CLOSE,
     S_UNINSTALL_TITLE, S_UNINSTALL_SUB, S_CANCEL, S_UNINSTALLED, S_OFFLINE_TITLE, S_RETRY, S_CHECKING, S_BACK,
-    S_INSTALL_FAILED, S_RECOMMENDED, S_SETUP, S_COUNT
+    S_INSTALL_FAILED, S_RECOMMENDED, S_SETUP, S_PERF_TITLE, S_PERF_SUB, S_HWACCEL, S_HWACCEL_DESC,
+    S_HWACCEL_NOTE, S_COUNT
 };
 
 struct Lang {
@@ -96,7 +97,8 @@ static const Lang kLangs[] = {
         L"Version %s · %s backend", L"Modify", L"Uninstall", L"Close", L"Uninstall Custom Start?",
         L"Your normal Start menu will come back.", L"Cancel", L"Custom Start was removed",
         L"Couldn't reach GitHub", L"Try again", L"Checking for updates…", L"Back",
-        L"Installation failed", L"Recommended", L"Custom Start Setup"}},
+        L"Installation failed", L"Recommended", L"Custom Start Setup",
+        L"Performance", L"Keep Custom Start light while you play.", L"Hardware acceleration", L"Draws on your graphics card, so Custom Start stays smooth and never slows down your games.", L"Only turn this off if Custom Start looks wrong on your PC."}},
     {L"es", L"Español", {
         L"hola", L"Continuar", L"Elige tu idioma", L"Se usa en la instalación y en Custom Start.",
         L"Elige el backend de código", L"Ambos se ven y funcionan igual. Puedes cambiarlo después.",
@@ -108,7 +110,8 @@ static const Lang kLangs[] = {
         L"Desinstalar", L"Cerrar", L"¿Desinstalar Custom Start?", L"Volverá tu menú Inicio normal.",
         L"Cancelar", L"Custom Start se ha eliminado", L"No se pudo conectar con GitHub", L"Reintentar",
         L"Buscando actualizaciones…", L"Atrás", L"La instalación falló", L"Recomendado",
-        L"Instalación de Custom Start"}},
+        L"Instalación de Custom Start",
+        L"Rendimiento", L"Mantén Custom Start ligero mientras juegas.", L"Aceleración por hardware", L"Dibuja con tu tarjeta gráfica, así Custom Start va fluido y nunca ralentiza tus juegos.", L"Desactívala solo si Custom Start se ve mal en tu PC."}},
     {L"fr", L"Français", {
         L"bonjour", L"Continuer", L"Choisissez votre langue", L"Utilisée pour l'installation et Custom Start.",
         L"Choisissez le moteur de code", L"Les deux sont identiques. Vous pourrez changer plus tard.",
@@ -120,7 +123,8 @@ static const Lang kLangs[] = {
         L"Modifier", L"Désinstaller", L"Fermer", L"Désinstaller Custom Start ?",
         L"Votre menu Démarrer habituel reviendra.", L"Annuler", L"Custom Start a été supprimé",
         L"Impossible de joindre GitHub", L"Réessayer", L"Recherche de mises à jour…", L"Retour",
-        L"L'installation a échoué", L"Recommandé", L"Installation de Custom Start"}},
+        L"L'installation a échoué", L"Recommandé", L"Installation de Custom Start",
+        L"Performances", L"Gardez Custom Start léger pendant que vous jouez.", L"Accélération matérielle", L"Utilise votre carte graphique : Custom Start reste fluide et ne ralentit jamais vos jeux.", L"Ne la désactivez que si Custom Start s'affiche mal sur votre PC."}},
     {L"de", L"Deutsch", {
         L"hallo", L"Weiter", L"Wählen Sie Ihre Sprache", L"Wird für Setup und Custom Start verwendet.",
         L"Wählen Sie ein Code-Backend", L"Beide sehen gleich aus und funktionieren gleich. Später änderbar.",
@@ -132,7 +136,8 @@ static const Lang kLangs[] = {
         L"Deinstallieren", L"Schließen", L"Custom Start deinstallieren?",
         L"Ihr normales Startmenü kehrt zurück.", L"Abbrechen", L"Custom Start wurde entfernt",
         L"GitHub nicht erreichbar", L"Erneut versuchen", L"Suche nach Updates…", L"Zurück",
-        L"Installation fehlgeschlagen", L"Empfohlen", L"Custom Start-Setup"}},
+        L"Installation fehlgeschlagen", L"Empfohlen", L"Custom Start-Setup",
+        L"Leistung", L"Custom Start bleibt leicht, während du spielst.", L"Hardwarebeschleunigung", L"Zeichnet über deine Grafikkarte, damit Custom Start flüssig bleibt und deine Spiele nie ausbremst.", L"Schalte sie nur aus, wenn Custom Start auf deinem PC falsch aussieht."}},
     {L"it", L"Italiano", {
         L"ciao", L"Continua", L"Scegli la lingua", L"Usata per l'installazione e per Custom Start.",
         L"Scegli il backend del codice", L"Entrambi sono identici. Puoi cambiare in seguito.",
@@ -143,7 +148,8 @@ static const Lang kLangs[] = {
         L"Versione %s · backend %s", L"Modifica", L"Disinstalla", L"Chiudi", L"Disinstallare Custom Start?",
         L"Tornerà il normale menu Start.", L"Annulla", L"Custom Start è stato rimosso",
         L"Impossibile raggiungere GitHub", L"Riprova", L"Ricerca aggiornamenti…", L"Indietro",
-        L"Installazione non riuscita", L"Consigliato", L"Installazione di Custom Start"}},
+        L"Installazione non riuscita", L"Consigliato", L"Installazione di Custom Start",
+        L"Prestazioni", L"Mantieni Custom Start leggero mentre giochi.", L"Accelerazione hardware", L"Disegna con la scheda grafica, così Custom Start resta fluido e non rallenta mai i tuoi giochi.", L"Disattivala solo se Custom Start non si vede bene sul tuo PC."}},
     {L"pt", L"Português", {
         L"olá", L"Continuar", L"Escolha seu idioma", L"Usado na instalação e no Custom Start.",
         L"Escolha o backend de código", L"Ambos são iguais. Você pode trocar depois.",
@@ -155,7 +161,8 @@ static const Lang kLangs[] = {
         L"Fechar", L"Desinstalar o Custom Start?", L"Seu menu Iniciar normal voltará.", L"Cancelar",
         L"O Custom Start foi removido", L"Não foi possível acessar o GitHub", L"Tentar novamente",
         L"Procurando atualizações…", L"Voltar", L"Falha na instalação", L"Recomendado",
-        L"Instalação do Custom Start"}},
+        L"Instalação do Custom Start",
+        L"Desempenho", L"Mantenha o Custom Start leve enquanto você joga.", L"Aceleração de hardware", L"Desenha com a placa de vídeo, para o Custom Start ficar fluido e nunca deixar seus jogos lentos.", L"Desative apenas se o Custom Start aparecer errado no seu PC."}},
     {L"ru", L"Русский", {
         L"привет", L"Продолжить",
         L"Выберите язык",
@@ -179,7 +186,8 @@ static const Lang kLangs[] = {
         L"Не удалось подключиться к GitHub",
         L"Повторить", L"Проверка обновлений…",
         L"Назад", L"Ошибка установки",
-        L"Рекомендуется", L"Установка Custom Start"}},
+        L"Рекомендуется", L"Установка Custom Start",
+        L"Производительность", L"Custom Start не будет мешать во время игры.", L"Аппаратное ускорение", L"Отрисовка на видеокарте: Custom Start работает плавно и не замедляет игры.", L"Отключайте, только если Custom Start отображается неправильно."}},
     {L"ja", L"日本語", {
         L"こんにちは", L"続行", L"言語を選択",
         L"セットアップと Custom Start で使用されます。",
@@ -201,7 +209,8 @@ static const Lang kLangs[] = {
         L"GitHub に接続できません", L"再試行",
         L"更新を確認しています…", L"戻る",
         L"インストールに失敗しました", L"おすすめ",
-        L"Custom Start セットアップ"}},
+        L"Custom Start セットアップ",
+        L"パフォーマンス", L"ゲーム中も Custom Start を軽く保ちます。", L"ハードウェア アクセラレーション", L"グラフィックス カードで描画するので、Custom Start は滑らかに動き、ゲームを遅くしません。", L"Custom Start の表示がおかしい場合のみオフにしてください。"}},
     {L"zh", L"中文", {
         L"你好", L"继续", L"选择你的语言", L"用于安装程序和 Custom Start。",
         L"选择代码后端", L"两者外观和功能相同，之后可以更改。",
@@ -214,7 +223,8 @@ static const Lang kLangs[] = {
         L"卸载 Custom Start？", L"将恢复正常的开始菜单。", L"取消",
         L"Custom Start 已移除", L"无法连接到 GitHub", L"重试",
         L"正在检查更新…", L"返回", L"安装失败", L"推荐",
-        L"Custom Start 安装程序"}},
+        L"Custom Start 安装程序",
+        L"性能", L"玩游戏时让 Custom Start 保持轻量。", L"硬件加速", L"使用显卡绘制，Custom Start 保持流畅，不会拖慢你的游戏。", L"仅在 Custom Start 显示异常时关闭。"}},
     {L"ko", L"한국어", {
         L"안녕하세요", L"계속", L"언어 선택",
         L"설치 프로그램과 Custom Start에 사용됩니다.",
@@ -232,7 +242,8 @@ static const Lang kLangs[] = {
         L"취소", L"Custom Start가 제거되었습니다",
         L"GitHub에 연결할 수 없습니다", L"다시 시도",
         L"업데이트 확인 중…", L"뒤로", L"설치 실패", L"권장",
-        L"Custom Start 설치"}},
+        L"Custom Start 설치",
+        L"성능", L"게임 중에도 Custom Start를 가볍게 유지합니다.", L"하드웨어 가속", L"그래픽 카드로 그려서 Custom Start가 부드럽게 동작하고 게임을 느리게 하지 않습니다.", L"Custom Start가 PC에서 이상하게 보일 때만 끄세요."}},
 };
 constexpr int kLangCount = (int)(sizeof(kLangs) / sizeof(kLangs[0]));
 
@@ -476,6 +487,8 @@ static std::wstring g_manifestErr;
 
 static std::wstring g_installedVersion, g_installedBackend;
 static std::wstring g_backend = L"cpp";
+static bool g_hwAccel = true;  // HardwareAcceleration: on unless the user turned it off
+static float g_hwAnim = 1.f;   // toggle switch position
 
 static std::wstring RegStr(HKEY root, const wchar_t* key, const wchar_t* name) {
     wchar_t buf[512];
@@ -549,7 +562,7 @@ static ID2D1Factory* g_d2d;
 static IDWriteFactory* g_dw;
 static ID2D1HwndRenderTarget* g_rt;
 static ID2D1SolidColorBrush* g_solid;
-static IDWriteTextFormat *g_fTitle, *g_fSub, *g_fBody, *g_fBtn, *g_fSmall, *g_fGlyph, *g_fBig, *g_fMono;
+static IDWriteTextFormat *g_fTitle, *g_fSub, *g_fBody, *g_fBtn, *g_fSmall, *g_fGlyph, *g_fBig, *g_fMono, *g_fIcon, *g_fCardTitle;
 static float g_dpi = 96;
 static bool g_acrylic = false;
 static LARGE_INTEGER g_qpf;
@@ -770,10 +783,10 @@ static ID2D1PathGeometry* TextGeometry(const std::wstring& text, std::initialize
 // ---------------------------------------------------------------------------
 // Pages & widgets
 // ---------------------------------------------------------------------------
-enum Page { P_NONE, P_LOADING, P_HELLO, P_LANG, P_BACKEND, P_INSTALL, P_DONE, P_UPDATE, P_UPTODATE,
+enum Page { P_NONE, P_LOADING, P_HELLO, P_LANG, P_BACKEND, P_PERF, P_INSTALL, P_DONE, P_UPDATE, P_UPTODATE,
             P_UNINSTALL, P_UNINSTALLED, P_ERROR };
 enum Id { B_NONE, B_CLOSE, B_MIN, B_CONTINUE, B_BACK, B_INSTALL, B_FINISH, B_UPDATE, B_NOTNOW, B_MODIFY,
-          B_UNINSTALL, B_CLOSE2, B_UNINSTALL_GO, B_CANCEL, B_RETRY, B_RUST, B_CPP, B_LANG0 = 100 };
+          B_UNINSTALL, B_CLOSE2, B_UNINSTALL_GO, B_CANCEL, B_RETRY, B_RUST, B_CPP, B_HWACCEL, B_LANG0 = 100 };
 enum BtnStyle { Primary, Secondary, Danger };
 
 static Page g_page = P_NONE, g_prevPage = P_NONE;
@@ -1029,6 +1042,71 @@ static void DrawBackend(float alpha, float dx) {
     float x0 = (W - 2 * cw - gap) / 2 + dx;
     BackendCard(B_RUST, D2D1::RectF(x0, y, x0 + cw, y + ch), L"Rs", 0xB7410E, L"Rust", T(S_RUST_DESC), g_backend == L"rust", false, alpha);
     BackendCard(B_CPP, D2D1::RectF(x0 + cw + gap, y, x0 + 2 * cw + gap, y + ch), L"C++", 0x3F6FB5, L"C++", T(S_CPP_DESC), g_backend == L"cpp", true, alpha);
+    FooterButtons(alpha, dx, B_BACK, T(S_BACK), B_CONTINUE, T(S_CONTINUE));
+}
+
+static float TextWidth(const std::wstring& str, IDWriteTextFormat* f) {
+    IDWriteTextLayout* l = nullptr;
+    DWRITE_TEXT_METRICS m = {};
+    if (SUCCEEDED(g_dw->CreateTextLayout(str.c_str(), (UINT32)str.size(), f, 10000.f, 100.f, &l))) {
+        l->GetMetrics(&m);
+        l->Release();
+    }
+    return m.widthIncludingTrailingWhitespace;
+}
+
+// "Performance": one card with the Hardware acceleration switch (on, and Recommended, by default).
+static void DrawPerf(float alpha, float dx, float dt) {
+    using namespace Ui;
+    Header(T(S_PERF_TITLE), T(S_PERF_SUB), alpha, dx);
+    g_hwAnim = Damp(g_hwAnim, g_hwAccel ? 1.f : 0.f, 18.f, dt);
+    float k = g_hwAnim;
+
+    float cw = 620, ch = 140, x = (W - cw) / 2 + dx, y = 200;
+    D2D1_RECT_F r = D2D1::RectF(x, y, x + cw, y + ch);
+    AddHit(r, B_HWACCEL);
+    float h = HoverOf(B_HWACCEL);
+    g_solid->SetColor(Col(0xFFFFFF, alpha * (0.06f + 0.04f * h)));
+    g_rt->FillRoundedRectangle(D2D1::RoundedRect(r, 14, 14), g_solid);
+    g_solid->SetColor(Col(0xFFFFFF, alpha * 0.09f));
+    g_rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + .5f, y + .5f, x + cw - .5f, y + ch - .5f), 13.5f, 13.5f), g_solid, 1.f);
+
+    // icon: a lightning bolt in a tile that lights up with the switch
+    D2D1_RECT_F tile = D2D1::RectF(x + 28, y + ch / 2 - 28, x + 84, y + ch / 2 + 28);
+    g_solid->SetColor(Col(0x0A7CFF, alpha * (0.18f + 0.62f * k)));
+    g_rt->FillRoundedRectangle(D2D1::RoundedRect(tile, 14, 14), g_solid);
+    Text(L"\uE945", g_fIcon, tile, Col(0xFFFFFF, alpha * (0.7f + 0.3f * k)));
+
+    // name + Recommended badge
+    float tx = x + 108, sw = 52, right = x + cw - 28 - sw - 20;
+    std::wstring name = T(S_HWACCEL);
+    float nw = std::min(TextWidth(name, g_fCardTitle), right - tx - 120);
+    Text(name, g_fCardTitle, D2D1::RectF(tx, y + 24, tx + nw + 2, y + 52), Col(0xFFFFFF, alpha), DWRITE_TEXT_ALIGNMENT_LEADING);
+    std::wstring rec = T(S_RECOMMENDED);
+    float bw = TextWidth(rec, g_fSmall) + 22;
+    D2D1_RECT_F b = D2D1::RectF(tx + nw + 12, y + 27, tx + nw + 12 + bw, y + 49);
+    g_solid->SetColor(Col(0x0A7CFF, alpha * 0.25f));
+    g_rt->FillRoundedRectangle(D2D1::RoundedRect(b, 11, 11), g_solid);
+    Text(rec, g_fSmall, b, Col(0x9CCBFF, alpha));
+    Text(T(S_HWACCEL_DESC), g_fBody, D2D1::RectF(tx, y + 58, right, y + ch - 20), Col(0xFFFFFF, 0.7f * alpha),
+         DWRITE_TEXT_ALIGNMENT_LEADING, true);
+
+    // switch
+    float sx = x + cw - 28 - sw, sy = y + ch / 2;
+    D2D1_RECT_F track = D2D1::RectF(sx, sy - 14, sx + sw, sy + 14);
+    D2D1_COLOR_F off = Col(0xFFFFFF, alpha * (0.10f + 0.05f * h)), on = Col(0x0A7CFF, alpha);
+    g_solid->SetColor({off.r + (on.r - off.r) * k, off.g + (on.g - off.g) * k, off.b + (on.b - off.b) * k,
+                       off.a + (on.a - off.a) * k});
+    g_rt->FillRoundedRectangle(D2D1::RoundedRect(track, 14, 14), g_solid);
+    if (k < 0.99f) {
+        g_solid->SetColor(Col(0xFFFFFF, alpha * 0.45f * (1 - k)));
+        g_rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(sx + .5f, sy - 13.5f, sx + sw - .5f, sy + 13.5f), 13.5f, 13.5f), g_solid, 1.f);
+    }
+    float kr = 9.f + 1.f * k, kx = sx + 14 + (sw - 28) * k;
+    g_solid->SetColor(Col(0xFFFFFF, alpha * (0.75f + 0.25f * k)));
+    g_rt->FillEllipse(D2D1::Ellipse({kx, sy}, kr, kr), g_solid);
+
+    Text(T(S_HWACCEL_NOTE), g_fSmall, D2D1::RectF(40 + dx, y + ch + 18, W - 40 + dx, y + ch + 40), Col(0xFFFFFF, 0.5f * alpha));
     FooterButtons(alpha, dx, B_BACK, T(S_BACK), B_INSTALL, T(S_INSTALL));
 }
 
@@ -1200,6 +1278,7 @@ static void DrawPage(Page p, float alpha, float dx, float dt, double now) {
     case P_HELLO: DrawHello(alpha, dx, now); break;
     case P_LANG: DrawLang(alpha, dx, dt); break;
     case P_BACKEND: DrawBackend(alpha, dx); break;
+    case P_PERF: DrawPerf(alpha, dx, dt); break;
     case P_INSTALL: DrawInstall(alpha, dx, dt, now); break;
     case P_DONE: DrawDone(alpha, dx, now); break;
     case P_UPDATE: DrawUpdate(alpha, dx); break;
@@ -1371,7 +1450,7 @@ static bool FetchManifest(std::wstring& err) {
     return true;
 }
 
-static void InstallWorker(std::wstring backend, std::wstring langCode) {
+static void InstallWorker(std::wstring backend, std::wstring langCode, bool hwAccel) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     std::wstring err;
     bool ok = false;
@@ -1410,6 +1489,7 @@ static void InstallWorker(std::wstring backend, std::wstring langCode) {
         RegSetStr(HKEY_CURRENT_USER, kSettingsKey, L"InstalledVersion", m.version);
         RegSetStr(HKEY_CURRENT_USER, kSettingsKey, L"Backend", backend);
         RegSetStr(HKEY_CURRENT_USER, kSettingsKey, L"Language", langCode);
+        RegSetDword(HKEY_CURRENT_USER, kSettingsKey, L"HardwareAcceleration", hwAccel ? 1 : 0);
         RegSetStr(HKEY_CURRENT_USER, kRunKey, L"CustomStartMenu", L"\"" + AppExe() + L"\"");
 
         RegSetStr(HKEY_CURRENT_USER, kUninstallKey, L"DisplayName", L"Custom Start (CSM)");
@@ -1490,7 +1570,7 @@ static void BeginInstall(bool update) {
     g_progress = 0;
     g_progressShown = 0;
     GoTo(P_INSTALL);
-    std::thread(InstallWorker, g_backend, std::wstring(kLangs[g_lang].code)).detach();
+    std::thread(InstallWorker, g_backend, std::wstring(kLangs[g_lang].code), g_hwAccel).detach();
 }
 
 static void OnClick(int id) {
@@ -1503,13 +1583,16 @@ static void OnClick(int id) {
     case B_CONTINUE:
         if (g_page == P_HELLO) GoTo(P_LANG);
         else if (g_page == P_LANG) GoTo(P_BACKEND);
+        else if (g_page == P_BACKEND) GoTo(P_PERF);
         break;
     case B_BACK:
         if (g_page == P_LANG) GoTo(g_installedVersion.empty() ? P_HELLO : P_UPTODATE, -1);
         else if (g_page == P_BACKEND) GoTo(P_LANG, -1);
+        else if (g_page == P_PERF) GoTo(P_BACKEND, -1);
         break;
     case B_RUST: g_backend = L"rust"; break;
     case B_CPP: g_backend = L"cpp"; break;
+    case B_HWACCEL: g_hwAccel = !g_hwAccel; break;
     case B_INSTALL: BeginInstall(false); break;
     case B_UPDATE:
         if (!g_installedBackend.empty()) g_backend = g_installedBackend;
@@ -1539,7 +1622,8 @@ static void OnEnter() {
     switch (g_page) {
     case P_HELLO: if (Now() - g_helloStart > 3.5) OnClick(B_CONTINUE); break;
     case P_LANG: OnClick(B_CONTINUE); break;
-    case P_BACKEND: OnClick(B_INSTALL); break;
+    case P_BACKEND: OnClick(B_CONTINUE); break;
+    case P_PERF: OnClick(B_INSTALL); break;
     case P_DONE: OnClick(B_FINISH); break;
     case P_UPDATE: OnClick(B_UPDATE); break;
     case P_UPTODATE: case P_UNINSTALLED: OnClick(B_CLOSE2); break;
@@ -1552,6 +1636,26 @@ static void OnEnter() {
 // ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------
+// A game or other fullscreen app is in front: an update prompt waits until it's gone.
+static bool SomethingFullscreen() {
+    QUERY_USER_NOTIFICATION_STATE qs;
+    if (SUCCEEDED(SHQueryUserNotificationState(&qs)) &&
+        (qs == QUNS_RUNNING_D3D_FULL_SCREEN || qs == QUNS_BUSY || qs == QUNS_PRESENTATION_MODE))
+        return true;
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == g_hwnd || fg == GetShellWindow() || fg == GetDesktopWindow()) return false;
+    wchar_t cls[64] = {};
+    GetClassNameW(fg, cls, 64);
+    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
+    if ((GetWindowLongW(fg, GWL_STYLE) & WS_CAPTION) == WS_CAPTION) return false;
+    RECT r;
+    MONITORINFO mi = {sizeof(mi)};
+    if (!GetWindowRect(fg, &r) || !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi)) return false;
+    return r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right &&
+           r.bottom >= mi.rcMonitor.bottom;
+}
+#define TIMER_SHOW_UPDATE 7
+
 static void ApplyBackdrop(HWND h) {
     BOOL dark = TRUE;
     DwmSetWindowAttribute(h, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
@@ -1601,6 +1705,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_KEYDOWN:
         if (wp == VK_RETURN) OnEnter();
+        else if (wp == VK_SPACE && g_page == P_PERF) OnClick(B_HWACCEL);
         else if (wp == VK_ESCAPE && g_page == P_UPDATE) OnClick(B_NOTNOW);
         return 0;
     case WM_SIZE:
@@ -1614,7 +1719,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_APP_MANIFEST: {
-        if (g_uninstalling || g_page == P_UNINSTALL || g_page == P_INSTALL || g_page == P_HELLO || g_page == P_LANG || g_page == P_BACKEND)
+        if (g_uninstalling || g_page == P_UNINSTALL || g_page == P_INSTALL || g_page == P_HELLO || g_page == P_LANG || g_page == P_BACKEND ||
+            g_page == P_PERF)
             return 0;  // first-run flow: the manifest is just cached for the install step
         bool ok = wp != 0;
         std::wstring latest;
@@ -1625,13 +1731,23 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             GoTo(P_ERROR);
         } else if (CompareVersions(latest, g_installedVersion) > 0) {
             GoTo(P_UPDATE);
-            if (g_checkOnly) { ShowWindow(h, SW_SHOW); SetForegroundWindow(h); }
+            if (g_checkOnly) {
+                if (SomethingFullscreen()) SetTimer(h, TIMER_SHOW_UPDATE, 30 * 1000, nullptr);
+                else { ShowWindow(h, SW_SHOW); SetForegroundWindow(h); }
+            }
         } else {
             if (g_checkOnly) { DestroyWindow(h); return 0; }
             GoTo(P_UPTODATE);
         }
         return 0;
     }
+    case WM_TIMER:
+        if (wp == TIMER_SHOW_UPDATE && !SomethingFullscreen()) {
+            KillTimer(h, TIMER_SHOW_UPDATE);
+            ShowWindow(h, SW_SHOW);
+            SetForegroundWindow(h);
+        }
+        return 0;
     case WM_APP_INSTALLED:
         g_installFailed = wp == 0;
         if (wp) GoTo(P_DONE);
@@ -1668,6 +1784,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_installedBackend = RegStr(HKEY_CURRENT_USER, kSettingsKey, L"Backend");
     if (GetFileAttributesW(AppExe().c_str()) == INVALID_FILE_ATTRIBUTES) g_installedVersion.clear();
     if (!g_installedBackend.empty()) g_backend = g_installedBackend;
+    {
+        DWORD v = 1, sz = sizeof(v);
+        if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"HardwareAcceleration", RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS)
+            g_hwAccel = v != 0;
+        g_hwAnim = g_hwAccel ? 1.f : 0.f;
+    }
     std::wstring savedLang = RegStr(HKEY_CURRENT_USER, kSettingsKey, L"Language");
     g_lang = savedLang.empty() || LangIndex(savedLang) < 0 ? SystemLanguage() : LangIndex(savedLang);
     if (g_checkOnly && g_installedVersion.empty()) return 0;
@@ -1690,6 +1812,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         g_fGlyph = MakeFormat(10, DWRITE_FONT_WEIGHT_NORMAL, ex ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets");
         IDWriteTextFormat* bigGlyph = MakeFormat(44, DWRITE_FONT_WEIGHT_NORMAL, ex ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets");
         g_fMono = bigGlyph;
+        g_fIcon = MakeFormat(24, DWRITE_FONT_WEIGHT_NORMAL, ex ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets");
+    }
+    {
+        g_fCardTitle = MakeFormat(18, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     }
 
     WNDCLASSEXW wc = {sizeof(wc)};
@@ -1759,7 +1885,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     SafeRelease(g_helloGeo);
     SafeRelease(g_solid);
     SafeRelease(g_rt);
-    for (auto* f : {g_fTitle, g_fSub, g_fBody, g_fBtn, g_fSmall, g_fGlyph, g_fBig, g_fMono})
+    for (auto* f : {g_fTitle, g_fSub, g_fBody, g_fBtn, g_fSmall, g_fGlyph, g_fBig, g_fMono, g_fIcon, g_fCardTitle})
         if (f) f->Release();
     SafeRelease(g_dw);
     SafeRelease(g_d2d);

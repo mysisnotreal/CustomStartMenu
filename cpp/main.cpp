@@ -23,7 +23,10 @@
 #include <knownfolders.h>
 #include <shellscalingapi.h>
 #include <dwmapi.h>
-#include <d2d1.h>
+#include <d2d1_1.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <dcomp.h>
 #include <dwrite.h>
 #include <UIAutomation.h>
 
@@ -50,6 +53,9 @@
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dcomp.lib")
 
 using D2D1::ColorF;
 using D2D1::Matrix3x2F;
@@ -211,12 +217,26 @@ static HHOOK g_kbHook, g_msHook;
 static HANDLE g_quitEvent;
 static HICON g_trayIcon;
 
-static ID2D1Factory* g_d2d;
+static ID2D1Factory1* g_d2d;
 static IDWriteFactory* g_dw;
 static IDWriteTextFormat *g_fmtText, *g_fmtHint, *g_fmtRow, *g_fmtRowRight, *g_fmtGlyph, *g_fmtHeader, *g_fmtCard;
 static IDWriteTextLayout* g_placeholderLayout;
 
-static ID2D1DCRenderTarget* g_rt;
+// Rendering backends. Hardware acceleration (the default, chosen in Setup) draws on the GPU
+// into a DirectComposition swap chain, so nothing is copied back to the CPU. Without it,
+// Direct2D renders in software into a layered window and never touches the GPU.
+static bool g_hw = true;
+static ID2D1RenderTarget* g_rt;     // the active target (one of the two below)
+static ID2D1DCRenderTarget* g_dcrt;  // software
+static ID3D11Device* g_d3d;          // hardware
+static ID2D1Device* g_d2dDev;
+static ID2D1DeviceContext* g_ctx;
+static IDXGISwapChain1* g_swap;
+static ID2D1Bitmap1* g_target;
+static IDCompositionDevice* g_dcomp;
+static IDCompositionTarget* g_dcTarget;
+static IDCompositionVisual* g_dcVisual;
+static int g_winH = -1;  // current window height (hardware path)
 static ID2D1SolidColorBrush* g_solid;
 static ID2D1LinearGradientBrush* g_logoBrush;
 static ID2D1Bitmap* g_shadowBmp;
@@ -275,8 +295,15 @@ struct HitItem {
 static std::vector<HitItem> g_hits;
 static POINT g_lastMouse = {-1, -1};
 
-// hooks
-static bool g_intercept = true;
+// hooks: they run on their own high-priority thread so that input never waits on the UI
+// thread, and only read the atomics below. The mouse hook is removed entirely while a game
+// or other fullscreen app is in front (unless the bar is open).
+#define WM_HOOK_SYNC (WM_APP + 20)
+static DWORD g_hookTid;
+static std::atomic<bool> g_intercept{true};
+static std::atomic<bool> g_barOpen{false};
+static std::atomic<bool> g_fullscreen{false};
+static std::atomic<LONG> g_boxL{0}, g_boxT{0}, g_boxR{0}, g_boxB{0};  // bar rectangle on screen
 static bool g_winDown = false, g_winEmitted = false, g_swallowEscUp = false, g_swallowClickUp = false;
 static DWORD g_winVk = 0, g_winFlags = 0, g_winLastTime = 0;
 
@@ -413,6 +440,7 @@ static void ApplyTheme(int idx) {
 static void UpdateState();
 
 static DWORD WINAPI AppsThread(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     std::vector<App> apps;
     IShellItem* folder = nullptr;
@@ -525,6 +553,7 @@ static bool LoadIconPixels(const std::wstring& target, int size, std::vector<UIN
 }
 
 static void IconWorker() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     for (;;) {
         std::wstring key;
@@ -696,7 +725,33 @@ static BOOL CALLBACK EnumTaskbars(HWND h, LPARAM lp) {
     return TRUE;
 }
 
+// A game or other fullscreen app is in front (exclusive or borderless fullscreen).
+static bool ForegroundIsFullscreen() {
+    QUERY_USER_NOTIFICATION_STATE qs;
+    if (SUCCEEDED(SHQueryUserNotificationState(&qs)) &&
+        (qs == QUNS_RUNNING_D3D_FULL_SCREEN || qs == QUNS_BUSY || qs == QUNS_PRESENTATION_MODE))
+        return true;
+    HWND fg = GetForegroundWindow();
+    if (!fg || fg == g_hwnd || fg == GetShellWindow() || fg == GetDesktopWindow()) return false;
+    wchar_t cls[64] = {};
+    GetClassNameW(fg, cls, 64);
+    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd") ||
+        !wcscmp(cls, L"Shell_SecondaryTrayWnd"))
+        return false;
+    LONG style = GetWindowLongW(fg, GWL_STYLE);
+    if ((style & WS_CAPTION) == WS_CAPTION) return false;  // a normal maximized window
+    RECT r;
+    MONITORINFO mi = {sizeof(mi)};
+    if (!GetWindowRect(fg, &r) || !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi))
+        return false;
+    return r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right &&
+           r.bottom >= mi.rcMonitor.bottom;
+}
+
+// Background watcher: notices games / fullscreen apps once a second, and (only when none is
+// running) refreshes where the Start button is.
 static DWORD WINAPI StartButtonThread(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IUIAutomation* uia = nullptr;
     CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IUIAutomation), (void**)&uia);
@@ -709,8 +764,17 @@ static DWORD WINAPI StartButtonThread(LPVOID) {
         uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, v, &cond);
         VariantClear(&v);
     }
-    if (uia && cond) {
-        do {
+    int sinceQuery = 1000;
+    do {
+        bool fs = ForegroundIsFullscreen();
+        if (fs != g_fullscreen.load()) {
+            g_fullscreen = fs;
+            if (g_hookTid) PostThreadMessageW(g_hookTid, WM_HOOK_SYNC, 0, 0);
+            if (!fs) sinceQuery = 1000;  // the taskbar may have moved meanwhile
+        }
+        if (fs || !uia || !cond || ++sinceQuery < 3) continue;
+        sinceQuery = 0;
+        {
             std::vector<HWND> bars;
             EnumWindows(EnumTaskbars, (LPARAM)&bars);
             std::vector<RECT> rects;
@@ -730,8 +794,8 @@ static DWORD WINAPI StartButtonThread(LPVOID) {
             AcquireSRWLockExclusive(&g_startLock);
             g_startRects.swap(rects);
             ReleaseSRWLockExclusive(&g_startLock);
-        } while (WaitForSingleObject(g_quitEvent, 2500) == WAIT_TIMEOUT);
-    }
+        }
+    } while (WaitForSingleObject(g_quitEvent, 1000) == WAIT_TIMEOUT);
     SafeRelease(cond);
     SafeRelease(uia);
     CoUninitialize();
@@ -808,18 +872,22 @@ static LRESULT CALLBACK KbdProc(int code, WPARAM wp, LPARAM lp) {
     return CallNextHookEx(nullptr, code, wp, lp);
 }
 
-static RECT ContainerScreenRect() {
+// Called on the UI thread whenever the bar moves or resizes.
+static void PublishBox() {
     float s = g_dpi / 96.f;
-    RECT r;
-    r.left = g_winPos.x + (LONG)(Lay::Margin * s);
-    r.top = g_winPos.y + (LONG)(Lay::Margin * s);
-    r.right = r.left + (LONG)(Lay::BarW * s);
-    r.bottom = r.top + (LONG)((Lay::BarH + g_panelH) * s);
-    return r;
+    LONG l = g_winPos.x + (LONG)(Lay::Margin * s), t = g_winPos.y + (LONG)(Lay::Margin * s);
+    g_boxL = l;
+    g_boxT = t;
+    g_boxR = l + (LONG)(Lay::BarW * s);
+    g_boxB = t + (LONG)((Lay::BarH + g_panelH) * s);
+}
+
+static void SetBarOpen(bool open) {
+    if (g_barOpen.exchange(open) != open && g_hookTid) PostThreadMessageW(g_hookTid, WM_HOOK_SYNC, 0, 0);
 }
 
 static LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
-    if (code == HC_ACTION) {
+    if (code == HC_ACTION && wp != WM_MOUSEMOVE) {  // moves are the hot path: let them straight through
         auto* m = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
         if (!(m->flags & LLMHF_INJECTED)) {
             if (g_intercept && wp == WM_LBUTTONDOWN && PointOnStartButton(m->pt)) {
@@ -832,13 +900,41 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp) {
                 return 1;
             }
             // Clicking anywhere outside the bar closes it (even if focus could not be taken).
-            if ((wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN) && g_visible && g_animTo > 0.5) {
-                RECT r = ContainerScreenRect();
-                if (!PtInRect(&r, m->pt)) PostMessageW(g_hwnd, WM_APP_HIDE, 0, 0);
+            if ((wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN) && g_barOpen) {
+                POINT p = m->pt;
+                if (p.x < g_boxL || p.x >= g_boxR || p.y < g_boxT || p.y >= g_boxB)
+                    PostMessageW(g_hwnd, WM_APP_HIDE, 0, 0);
             }
         }
     }
     return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+// Owns both low-level hooks. Runs at time-critical priority and does almost nothing else, so
+// a busy CPU (a game, a compile) never makes the mouse or keyboard wait on Custom Start.
+static void SyncMouseHook() {
+    bool want = !g_fullscreen || g_barOpen;
+    if (want && !g_msHook) {
+        g_msHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, GetModuleHandleW(nullptr), 0);
+    } else if (!want && g_msHook) {
+        UnhookWindowsHookEx(g_msHook);
+        g_msHook = nullptr;
+        g_swallowClickUp = false;
+    }
+}
+static DWORD WINAPI HookThread(LPVOID ready) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    MSG msg;
+    PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);  // create the message queue
+    g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, KbdProc, GetModuleHandleW(nullptr), 0);
+    SyncMouseHook();
+    SetEvent((HANDLE)ready);
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+        if (msg.message == WM_HOOK_SYNC) SyncMouseHook();
+    if (g_msHook) UnhookWindowsHookEx(g_msHook);
+    if (g_kbHook) UnhookWindowsHookEx(g_kbHook);
+    g_msHook = g_kbHook = nullptr;
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -917,15 +1013,94 @@ static void DiscardDeviceResources() {
         std::lock_guard<std::mutex> lk(g_iconMx);
         for (auto& kv : g_icons) SafeRelease(kv.second.bmp);
     }
-    SafeRelease(g_rt);
+    g_rt = nullptr;
+    SafeRelease(g_dcrt);
+    if (g_ctx) g_ctx->SetTarget(nullptr);
+    SafeRelease(g_target);
+    SafeRelease(g_ctx);
+    SafeRelease(g_d2dDev);
+    SafeRelease(g_dcVisual);
+    SafeRelease(g_dcTarget);
+    SafeRelease(g_dcomp);
+    SafeRelease(g_swap);
+    SafeRelease(g_d3d);
+}
+
+static ID3D11Device* CreateD3DDevice() {
+    ID3D11Device* dev = nullptr;
+    for (D3D_DRIVER_TYPE t : {D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP})
+        if (SUCCEEDED(D3D11CreateDevice(nullptr, t, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                        D3D11_SDK_VERSION, &dev, nullptr, nullptr)))
+            return dev;
+    return nullptr;
+}
+
+static bool BindSwapTarget() {
+    IDXGISurface* surf = nullptr;
+    if (FAILED(g_swap->GetBuffer(0, IID_PPV_ARGS(&surf)))) return false;
+    D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.f, 96.f);
+    HRESULT hr = g_ctx->CreateBitmapFromDxgiSurface(surf, &bp, &g_target);
+    surf->Release();
+    if (FAILED(hr)) return false;
+    g_ctx->SetTarget(g_target);
+    g_ctx->SetDpi(g_dpi, g_dpi);
+    return true;
+}
+
+static bool CreateGpuTarget() {
+    g_d3d = CreateD3DDevice();
+    if (!g_d3d) return false;
+    IDXGIDevice1* dxgi = nullptr;
+    IDXGIAdapter* adapter = nullptr;
+    IDXGIFactory2* factory = nullptr;
+    bool ok = SUCCEEDED(g_d3d->QueryInterface(IID_PPV_ARGS(&dxgi)));
+    if (ok) {
+        dxgi->SetMaximumFrameLatency(1);  // Present(1) then paces us at the display's refresh rate
+        ok = SUCCEEDED(g_d2d->CreateDevice(dxgi, &g_d2dDev)) &&
+             SUCCEEDED(g_d2dDev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &g_ctx)) &&
+             SUCCEEDED(dxgi->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetParent(IID_PPV_ARGS(&factory)));
+    }
+    if (ok) {
+        DXGI_SWAP_CHAIN_DESC1 d = {};
+        d.Width = g_pxW;
+        d.Height = g_pxH;
+        d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        d.BufferCount = 2;
+        d.Scaling = DXGI_SCALING_STRETCH;
+        d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        d.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        ok = SUCCEEDED(factory->CreateSwapChainForComposition(g_d3d, &d, nullptr, &g_swap)) &&
+             SUCCEEDED(DCompositionCreateDevice(dxgi, IID_PPV_ARGS(&g_dcomp))) &&
+             SUCCEEDED(g_dcomp->CreateTargetForHwnd(g_hwnd, TRUE, &g_dcTarget)) &&
+             SUCCEEDED(g_dcomp->CreateVisual(&g_dcVisual)) && SUCCEEDED(g_dcVisual->SetContent(g_swap)) &&
+             SUCCEEDED(g_dcTarget->SetRoot(g_dcVisual)) && SUCCEEDED(g_dcomp->Commit()) && BindSwapTarget();
+    }
+    SafeRelease(factory);
+    SafeRelease(adapter);
+    SafeRelease(dxgi);
+    if (!ok) return false;
+    g_rt = g_ctx;
+    return true;
 }
 
 static bool CreateDeviceResources() {
     if (g_rt) return true;
-    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-    if (FAILED(g_d2d->CreateDCRenderTarget(&props, &g_rt))) return false;
+    if (g_hw) {
+        if (!CreateGpuTarget()) {
+            DiscardDeviceResources();
+            return false;
+        }
+    } else {
+        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (FAILED(g_d2d->CreateDCRenderTarget(&props, &g_dcrt))) return false;
+        g_rt = g_dcrt;
+    }
     g_rt->SetDpi(g_dpi, g_dpi);
     g_rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     g_rt->CreateSolidColorBrush(ColorF(0, 1.f), &g_solid);
@@ -987,6 +1162,18 @@ static void BuildShadow() {
 }
 
 static void EnsureSurface(int w, int h) {
+    if (g_hw) {
+        if (w == g_pxW && h == g_pxH) return;
+        g_pxW = w;
+        g_pxH = h;
+        if (g_swap) {
+            g_ctx->SetTarget(nullptr);
+            SafeRelease(g_target);
+            if (FAILED(g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)) || !BindSwapTarget())
+                DiscardDeviceResources();
+        }
+        return;
+    }
     if (g_dib && w == g_pxW && h == g_pxH) return;
     if (g_dib) {
         SelectObject(g_memDC, g_oldBmp);
@@ -1026,6 +1213,7 @@ static void PositionOnMonitor() {
     int barCenterY = wa.top + (int)std::lround((wa.bottom - wa.top) * Lay::VerticalPos);
     g_winPos.x = (wa.left + wa.right) / 2 - w / 2;
     g_winPos.y = barCenterY - (int)std::lround((Lay::Margin + Lay::BarH / 2) * s);
+    g_winH = -1;  // hardware path: move/resize the window on the next frame
 }
 
 // Snapshot the desktop behind the (hidden) window and blur it: the frosted backdrop.
@@ -1499,7 +1687,7 @@ static void DrawPanel(double now, float dt) {
 }
 
 static void Render() {
-    if (!g_dib || !CreateDeviceResources()) return;
+    if (!g_pxW || !CreateDeviceResources()) return;
     double now = Now();
     float dt = (float)std::clamp(now - g_lastFrame, 0.0, 0.05);
     g_lastFrame = now;
@@ -1510,6 +1698,7 @@ static void Render() {
     if (s >= 1.0 && g_animTo < 0.5) {
         g_anim = 0;
         g_visible = false;
+        SetBarOpen(false);
         ShowWindow(g_hwnd, SW_HIDE);
         g_previewIdx = g_themeIdx;
         g_th = g_thFrom = kThemes[g_themeIdx];
@@ -1531,11 +1720,19 @@ static void Render() {
     EnsureBackdropBrush();
 
     using namespace Lay;
-    RECT rc = {0, 0, g_pxW, g_pxH};
-    g_rt->BindDC(g_memDC, &rc);
+    if (!g_hw) {
+        RECT rc = {0, 0, g_pxW, g_pxH};
+        g_dcrt->BindDC(g_memDC, &rc);
+    }
     g_rt->BeginDraw();
     g_rt->SetTransform(Matrix3x2F::Identity());
     g_rt->Clear(ColorF(0, 0.f));
+    // The layered window fades through its constant alpha; the swap chain fades through a layer.
+    bool fadeLayer = g_hw && g_anim < 0.999;
+    if (fadeLayer)
+        g_rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                              D2D1::IdentityMatrix(), (float)std::clamp(g_anim, 0.0, 1.0)),
+                        nullptr);
 
     float a = (float)g_anim;
     float sc = 0.94f + 0.06f * a;
@@ -1559,6 +1756,10 @@ static void Render() {
     DrawLogoAt(Margin + LogoX, Margin + (BarH - LogoSize) / 2, LogoSize, g_logoBrush, base, now, true);
     DrawTextArea(now, dt);
 
+    if (fadeLayer) {
+        g_rt->SetTransform(Matrix3x2F::Identity());
+        g_rt->PopLayer();
+    }
     HRESULT hr = g_rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
@@ -1567,6 +1768,17 @@ static void Render() {
 
     float scale = g_dpi / 96.f;
     int curH = std::min(g_pxH, (int)std::ceil((Margin * 2 + BarH + g_panelH) * scale));
+    PublishBox();
+    if (g_hw) {
+        // The window follows the panel's height so the empty space below never catches clicks.
+        if (curH != g_winH) {
+            SetWindowPos(g_hwnd, nullptr, g_winPos.x, g_winPos.y, g_pxW, curH, SWP_NOZORDER | SWP_NOACTIVATE);
+            g_winH = curH;
+        }
+        hr = g_swap->Present(1, 0);
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) DiscardDeviceResources();
+        return;
+    }
     BLENDFUNCTION bf = {AC_SRC_OVER, 0, (BYTE)std::lround(255.0 * std::clamp(g_anim, 0.0, 1.0)), AC_SRC_ALPHA};
     POINT src = {0, 0};
     SIZE sz = {g_pxW, curH};
@@ -1619,6 +1831,8 @@ static void Show() {
     }
     StartAnim(1.0, 0.32);
     g_visible = true;
+    PublishBox();
+    SetBarOpen(true);
     g_lastFrame = g_lastInput = Now();
     Render();
     SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
@@ -1629,6 +1843,7 @@ static void Show() {
 static void Hide() {
     if (!g_visible || g_animTo < 0.5) return;
     StartAnim(0.0, 0.18);
+    SetBarOpen(false);
     g_lastHideTime = Now();
     if (GetCapture() == g_hwnd) ReleaseCapture();
 }
@@ -2037,7 +2252,7 @@ static void ShowTrayMenu() {
     if (cmd >= ID_THEME0 && cmd < ID_THEME0 + kThemeCount) { ApplyTheme(cmd - ID_THEME0); return; }
     switch (cmd) {
     case ID_OPEN: Show(); break;
-    case ID_INTERCEPT: g_intercept = !g_intercept; break;
+    case ID_INTERCEPT: g_intercept = !g_intercept.load(); break;
     case ID_EXPANDED:
         g_expanded = !g_expanded;
         WriteDword(L"Expanded", g_expanded ? 1 : 0);
@@ -2062,7 +2277,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == TIMER_UPDATE_CHECK) {
             // Ask Setup (installed next to us) whether GitHub has a newer version; it stays
-            // hidden unless there is one, then shows "Update to V<x>?".
+            // hidden unless there is one, then shows "Update to V<x>?". Never in the middle of
+            // a game: wait until nothing is fullscreen.
+            if (g_fullscreen || ForegroundIsFullscreen()) {
+                SetTimer(h, TIMER_UPDATE_CHECK, 5 * 60 * 1000, nullptr);
+                return 0;
+            }
             SetTimer(h, TIMER_UPDATE_CHECK, 6 * 60 * 60 * 1000, nullptr);
             wchar_t path[MAX_PATH];
             GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -2162,6 +2382,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     g_autostart = IsAutoStart();
     g_previewIdx = g_themeIdx;
     g_th = g_thFrom = kThemes[g_themeIdx];
+    // Hardware acceleration (Setup asks; on by default). Falls back to software if there is
+    // no usable Direct3D 11 device at all.
+    g_hw = ReadDword(L"HardwareAcceleration", 1) != 0;
+    if (g_hw) {
+        if (ID3D11Device* probe = CreateD3DDevice()) probe->Release();
+        else g_hw = false;
+    }
 
     if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d)) ||
         FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
@@ -2186,16 +2413,19 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
 
-    g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kClassName, L"Custom Start",
-                             WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
+    DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | (g_hw ? WS_EX_NOREDIRECTIONBITMAP : WS_EX_LAYERED);
+    g_hwnd = CreateWindowExW(exStyle, kClassName, L"Custom Start", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst,
+                             nullptr);
     if (!g_hwnd) return 1;
 
     g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     AddTrayIcon();
     SetTimer(g_hwnd, TIMER_UPDATE_CHECK, 20 * 1000, nullptr);
 
-    g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, KbdProc, inst, 0);
-    g_msHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, inst, 0);
+    HANDLE hookReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE hookThread = CreateThread(nullptr, 0, HookThread, hookReady, 0, &g_hookTid);
+    if (hookThread) WaitForSingleObject(hookReady, 2000);
+    CloseHandle(hookReady);
 
     g_quitEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE uiaThread = CreateThread(nullptr, 0, StartButtonThread, nullptr, 0, nullptr);
@@ -2215,8 +2445,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             }
             if (!running) break;
             if (g_visible) {
+                // The swap chain's Present(1) already waits for the next refresh; the layered
+                // window (or a Present that returned early) waits on the compositor instead.
+                double t0 = Now();
                 Render();
-                if (FAILED(DwmFlush())) Sleep(8);
+                if (!g_hw || Now() - t0 < 0.004)
+                    if (FAILED(DwmFlush())) Sleep(8);
             }
         } else {
             BOOL r = GetMessageW(&msg, nullptr, 0, 0);
@@ -2237,8 +2471,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         WaitForSingleObject(uiaThread, 3000);
         CloseHandle(uiaThread);
     }
-    if (g_kbHook) UnhookWindowsHookEx(g_kbHook);
-    if (g_msHook) UnhookWindowsHookEx(g_msHook);
+    if (hookThread) {
+        PostThreadMessageW(g_hookTid, WM_QUIT, 0, 0);
+        WaitForSingleObject(hookThread, 2000);
+        CloseHandle(hookThread);
+    }
     RemoveTrayIcon();
     DiscardDeviceResources();
     SafeRelease(g_placeholderLayout);
