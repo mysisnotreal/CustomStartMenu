@@ -1,11 +1,20 @@
 {
-  "version": "1.2.0",
+  "version": "1.2.1",
   "assets": {
     "cpp": "CSM-cpp.exe",
     "rust": "CSM-rust.exe",
     "installer": "CSMInstaller.exe"
   },
   "releases": [
+    {
+      "version": "1.2.1",
+      "added": [
+        "Setup sees a new version as soon as it's released",
+        "Setup and Settings > Apps show the version that's really installed",
+        "Long lines in the update list wrap, and the list scrolls"
+      ],
+      "removed": []
+    },
     {
       "version": "1.2.0",
       "added": [

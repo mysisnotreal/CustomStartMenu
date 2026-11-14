@@ -52,6 +52,7 @@
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "version.lib")
 
 using D2D1::ColorF;
 using D2D1::Matrix3x2F;
@@ -61,6 +62,10 @@ using D2D1::Matrix3x2F;
 // ---------------------------------------------------------------------------
 static const wchar_t* kManifestUrl =
     L"https://raw.githubusercontent.com/mysisnotreal/CustomStartMenu/main/manifest.json";
+// The same file through the GitHub API: not behind raw.githubusercontent's few-minute cache, so a
+// release is seen the moment it's published. The raw URL above is the fallback (API rate limits).
+static const wchar_t* kManifestApiUrl =
+    L"https://api.github.com/repos/mysisnotreal/CustomStartMenu/contents/manifest.json?ref=main";
 static const wchar_t* kReleaseBase = L"https://github.com/mysisnotreal/CustomStartMenu/releases/download/v";
 static const wchar_t* kSettingsKey = L"Software\\CustomStartMenu";
 static const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -406,7 +411,7 @@ static int CompareVersions(const std::wstring& a, const std::wstring& b) {
 // HTTP (WinHTTP, follows GitHub's redirects to the release CDN)
 // ---------------------------------------------------------------------------
 static bool HttpGet(const std::wstring& url, std::string& out, const std::function<void(double)>& progress,
-                    std::wstring& err) {
+                    std::wstring& err, const wchar_t* headers = nullptr) {
     URL_COMPONENTS uc = {sizeof(uc)};
     wchar_t host[256] = {}, path[4096] = {}, extra[1024] = {};
     uc.lpszHostName = host;
@@ -430,7 +435,8 @@ static bool HttpGet(const std::wstring& url, std::string& out, const std::functi
                                          uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
                     : nullptr;
     bool ok = false;
-    if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+    if (r && WinHttpSendRequest(r, headers ? headers : WINHTTP_NO_ADDITIONAL_HEADERS, headers ? (DWORD)-1L : 0,
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
         WinHttpReceiveResponse(r, nullptr)) {
         DWORD status = 0, sz = sizeof(status);
         WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
@@ -1268,6 +1274,9 @@ static void DrawDone(float alpha, float dx, double now) {
     Button(B_FINISH, CenterRect(W / 2 + dx, H - 120, 220, 44), T(S_FINISH), Primary, alpha);
 }
 
+static float g_updateScroll = 0, g_updateContentH = 0;
+static D2D1_RECT_F g_updateBox = {};
+
 static void DrawUpdate(float alpha, float dx) {
     using namespace Ui;
     Manifest m;
@@ -1281,7 +1290,9 @@ static void DrawUpdate(float alpha, float dx) {
     g_solid->SetColor(Col(0xFFFFFF, 0.08f * alpha));
     g_rt->DrawRoundedRectangle(D2D1::RoundedRect(box, 12, 12), g_solid, 1);
     g_rt->PushAxisAlignedClip(D2D1::RectF(box.left, box.top + 4, box.right, box.bottom - 4), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    float y = box.top + 14;
+    g_updateBox = box;
+    float y = box.top + 14 - g_updateScroll;
+    float textW = (box.right - 20) - (box.left + 52);
     for (const Change& c : m.releases) {
         if (CompareVersions(c.version, g_installedVersion) <= 0) continue;
         Text(L"V" + c.version, g_fBtn, D2D1::RectF(box.left + 20, y, box.right - 20, y + 26), Col(0xFFFFFF, alpha), DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -1292,13 +1303,28 @@ static void DrawUpdate(float alpha, float dx) {
             g_solid->SetColor(Col(col, 0.18f * alpha));
             g_rt->FillRoundedRectangle(D2D1::RoundedRect(pill, 5, 5), g_solid);
             Text(add ? L"+" : L"−", g_fBtn, pill, Col(col, alpha));
-            Text(s, g_fBody, D2D1::RectF(box.left + 52, y, box.right - 20, y + 24), Col(col, alpha), DWRITE_TEXT_ALIGNMENT_LEADING);
-            y += 28;
+            // long lines wrap instead of running off the edge
+            float h = 24;
+            IDWriteTextLayout* l = nullptr;
+            if (SUCCEEDED(g_dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), g_fBody, textW, 1000, &l))) {
+                l->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                l->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                l->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+                DWRITE_TEXT_METRICS tm{};
+                l->GetMetrics(&tm);
+                float th = tm.height;
+                h = std::max(24.f, th + 4);
+                g_solid->SetColor(Col(col, alpha));
+                g_rt->DrawTextLayout({box.left + 52, y + 2}, l, g_solid);
+                l->Release();
+            }
+            y += h + 4;
         };
         for (auto& s : c.added) line(s, true);
         for (auto& s : c.removed) line(s, false);
         y += 10;
     }
+    g_updateContentH = y + g_updateScroll - box.top;
     g_rt->PopAxisAlignedClip();
     FooterButtons(alpha, dx, B_NOTNOW, T(S_NOT_NOW), B_UPDATE, T(S_UPDATE));
 }
@@ -1507,11 +1533,35 @@ static void MakeShortcut(const std::wstring& lnk, const std::wstring& target, co
 }
 
 static bool FetchManifest(std::wstring& err) {
-    std::string body;
-    std::wstring url = std::wstring(kManifestUrl) + L"?t=" + std::to_wstring(GetTickCount64());
+    // Ask both sources and keep whichever knows the newer version: either one can lag behind.
     Manifest m;
-    if (!HttpGet(url, body, nullptr, err)) return false;
-    if (!ParseManifest(body, m)) { err = L"manifest.json could not be read"; return false; }
+    bool have = false;
+    {
+        std::string body;
+        std::wstring e;
+        Manifest a;
+        if (HttpGet(kManifestApiUrl, body, nullptr, e,
+                    L"Accept: application/vnd.github.raw+json\r\nX-GitHub-Api-Version: 2022-11-28\r\nCache-Control: no-cache\r\n") &&
+            ParseManifest(body, a)) {
+            m = a;
+            have = true;
+        }
+    }
+    {
+        std::string body;
+        std::wstring e;
+        Manifest b;
+        std::wstring url = std::wstring(kManifestUrl) + L"?t=" + std::to_wstring(GetTickCount64());
+        if (HttpGet(url, body, nullptr, e, L"Cache-Control: no-cache\r\nPragma: no-cache\r\n")) {
+            if (ParseManifest(body, b)) {
+                if (!have || CompareVersions(b.version, m.version) > 0) m = b;
+                have = true;
+            } else if (!have) {
+                e = L"manifest.json could not be read";
+            }
+        }
+        if (!have) { err = e; return false; }
+    }
     std::lock_guard<std::mutex> lk(g_mx);
     g_manifest = m;
     g_manifestOk = true;
@@ -1635,6 +1685,19 @@ static void ScheduleSelfDelete() {
 }
 
 static bool g_checkOnly = false;
+
+// The version of the installed app, read from the exe itself ("" if it can't be read).
+static std::wstring ExeVersion(const std::wstring& path) {
+    DWORD dummy = 0, n = GetFileVersionInfoSizeW(path.c_str(), &dummy);
+    if (!n) return L"";
+    std::vector<BYTE> buf(n);
+    if (!GetFileVersionInfoW(path.c_str(), 0, n, buf.data())) return L"";
+    VS_FIXEDFILEINFO* fi = nullptr;
+    UINT len = 0;
+    if (!VerQueryValueW(buf.data(), L"\\", (void**)&fi, &len) || !fi || !len) return L"";
+    return std::to_wstring(HIWORD(fi->dwProductVersionMS)) + L"." + std::to_wstring(LOWORD(fi->dwProductVersionMS)) + L"." +
+           std::to_wstring(HIWORD(fi->dwProductVersionLS));
+}
 
 static void StartManifestFetch() {
     std::thread([] {
@@ -1768,6 +1831,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE: g_hot = 0; g_press = 0; return 0;
+    case WM_MOUSEWHEEL:
+        if (g_page == P_UPDATE) {  // scroll a long changelog
+            float view = g_updateBox.bottom - g_updateBox.top - 8;
+            float maxScroll = std::max(0.f, g_updateContentH - view);
+            g_updateScroll = std::clamp(g_updateScroll - GET_WHEEL_DELTA_WPARAM(wp) / 120.f * 40.f, 0.f, maxScroll);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
     case WM_LBUTTONDOWN:
         g_press = HitAt({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
         SetCapture(h);
@@ -1863,6 +1934,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_installedVersion = RegStr(HKEY_CURRENT_USER, kSettingsKey, L"InstalledVersion");
     g_installedBackend = RegStr(HKEY_CURRENT_USER, kSettingsKey, L"Backend");
     if (GetFileAttributesW(AppExe().c_str()) == INVALID_FILE_ATTRIBUTES) g_installedVersion.clear();
+    else if (!g_installedVersion.empty()) {
+        // The exe is the truth: the registry can fall behind if the app was replaced some other way.
+        std::wstring real = ExeVersion(AppExe());
+        if (!real.empty() && real != g_installedVersion) {
+            g_installedVersion = real;
+            RegSetStr(HKEY_CURRENT_USER, kSettingsKey, L"InstalledVersion", real);
+            RegSetStr(HKEY_CURRENT_USER, kUninstallKey, L"DisplayVersion", real);
+        }
+    }
     if (!g_installedBackend.empty()) g_backend = g_installedBackend;
     {
         DWORD v = 1, sz = sizeof(v);
