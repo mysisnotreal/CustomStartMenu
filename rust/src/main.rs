@@ -45,6 +45,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+mod fonts;
 mod games;
 mod pins;
 use games::{refresh_games, GAMES, GAMES_LOADING};
@@ -218,10 +219,12 @@ struct CmdDef {
     title: &'static str,
     glyph: &'static str, // Segoe Fluent Icons / MDL2
 }
-const CMDS: [CmdDef; 6] = [
+const CMDS: [CmdDef; 8] = [
     CmdDef { key: "games", title: "Games", glyph: "\u{E7FC}" },
     CmdDef { key: "pins", title: "Pinned apps", glyph: "\u{E718}" },
     CmdDef { key: "theme", title: "Theme", glyph: "\u{E790}" },
+    CmdDef { key: "font", title: "Font", glyph: "\u{E8D2}" },
+    CmdDef { key: "fontfolder", title: "Open font folder", glyph: "\u{E838}" },
     CmdDef { key: "expanded", title: "Expanded results", glyph: "\u{E8FD}" },
     CmdDef { key: "startup", title: "Start with Windows", glyph: "\u{E7E8}" },
     CmdDef { key: "quit", title: "Quit Custom Start", glyph: "\u{E711}" },
@@ -229,9 +232,11 @@ const CMDS: [CmdDef; 6] = [
 const CMD_GAMES: usize = 0;
 const CMD_PINS: usize = 1;
 const CMD_THEME: usize = 2;
-const CMD_EXPANDED: usize = 3;
-const CMD_STARTUP: usize = 4;
-const CMD_QUIT: usize = 5;
+const CMD_FONT: usize = 3;
+const CMD_FONTFOLDER: usize = 4;
+const CMD_EXPANDED: usize = 5;
+const CMD_STARTUP: usize = 6;
+const CMD_QUIT: usize = 7;
 
 const CLASS_NAME: PCWSTR = w!("CustomStartMenu.CommandBar");
 // Placeholder in the language chosen in Setup (HKCU\Software\CustomStartMenu\Language).
@@ -260,6 +265,7 @@ const WM_APP_HIDE: u32 = WM_APP + 4;
 const WM_APP_QUIT: u32 = WM_APP + 5; // sent by CSMInstaller before replacing the exe
 const WM_APP_GAMES: u32 = WM_APP + 6;
 const WM_APP_PINS: u32 = WM_APP + 7;
+const WM_APP_FONT: u32 = WM_APP + 8; // a font finished downloading
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_UPDATE_CHECK: usize = 1;
 
@@ -279,6 +285,7 @@ enum Mode {
     Themes,
     Games,
     Pins,
+    Fonts,
 }
 fn is_app_list(m: Mode) -> bool {
     matches!(m, Mode::Results | Mode::Games | Mode::Pins)
@@ -549,6 +556,7 @@ struct State {
     fmt_card: IDWriteTextFormat,
     fmt_tile: IDWriteTextFormat,
     fmt_menu: IDWriteTextFormat,
+    fmt_glyph_sm: IDWriteTextFormat,
     placeholder_layout: Option<IDWriteTextLayout>,
 
     // Rendering backends. Hardware acceleration (the default, chosen in Setup) draws on the
@@ -673,6 +681,8 @@ struct State {
 
     // focus to give back when the bar was opened over a game and is closed with Esc / Win
     prev_fg: HWND,
+
+    fonts: fonts::FontUi, // "> font"
 }
 
 static mut ST: *mut State = null_mut();
@@ -719,6 +729,19 @@ fn write_dword(name: &str, v: u32) {
         {
             let n = wz(name);
             let _ = RegSetValueExW(k, PCWSTR(n.as_ptr()), 0, REG_DWORD, Some(&v.to_le_bytes()));
+            let _ = RegCloseKey(k);
+        }
+    }
+}
+fn write_string(name: &str, v: &str) {
+    unsafe {
+        let mut k = HKEY::default();
+        if RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut k, None)
+            == ERROR_SUCCESS
+        {
+            let n = wz(name);
+            let data: Vec<u8> = wz(v).iter().flat_map(|c| c.to_le_bytes()).collect();
+            let _ = RegSetValueExW(k, PCWSTR(n.as_ptr()), 0, REG_SZ, Some(&data));
             let _ = RegCloseKey(k);
         }
     }
@@ -1050,6 +1073,7 @@ fn command_detail(c: usize) -> String {
                 s.pins.len().to_string()
             }
         }
+        CMD_FONT => fonts::display_name(&fonts::font_file()),
         _ => command_detail_str(c).to_string(),
     }
 }
@@ -1117,6 +1141,10 @@ fn update_state() {
         let word = |w: &str| q == ws(w) || starts_with(&q, &ws(&format!("{} ", w)));
         if q == ws("theme") || q == ws("themes") || starts_with(&q, &ws("theme ")) {
             s.mode = Mode::Themes;
+        } else if word("font") || word("fonts") {
+            s.mode = Mode::Fonts;
+            let skip = if word("fonts") { 5 } else { 4 };
+            fonts::build_list(&String::from_utf16_lossy(&trim(&q[skip.min(q.len())..])));
         } else if word("games") || word("game") {
             s.mode = Mode::Games;
             let skip = if word("games") { 5 } else { 4 };
@@ -1169,6 +1197,9 @@ fn update_state() {
             set_preview(s.theme_idx); // leaving without applying reverts the preview
         }
         s.sel = if s.mode == Mode::Themes { s.theme_idx as i32 } else { 0 };
+        if s.mode == Mode::Fonts {
+            fonts::enter();
+        }
         if s.mode != Mode::None {
             s.content_a = if old == Mode::None { 0.0 } else { s.content_a.min(0.35) };
             s.draw_mode = s.mode;
@@ -1179,6 +1210,9 @@ fn update_state() {
     } else if is_app_list(s.mode) || s.mode == Mode::Commands {
         s.sel = 0;
         s.list_top = 0;
+    } else if s.mode == Mode::Fonts {
+        s.sel = 0;
+        fonts::scroll_to(0.0, true);
     }
     recompute_ghost();
 
@@ -1198,6 +1232,7 @@ fn item_count() -> i32 {
         Mode::Results | Mode::Games | Mode::Pins => s.results.len() as i32,
         Mode::Commands => s.cmd_list.len() as i32,
         Mode::Themes => THEME_COUNT as i32,
+        Mode::Fonts => fonts::count(),
         Mode::None => 0,
     }
 }
@@ -1221,6 +1256,7 @@ fn panel_target_h() -> f32 {
             }
         }
         Mode::Themes => theme_grid_height(),
+        Mode::Fonts => fonts::panel_h(),
         Mode::None => 0.0,
     }
 }
@@ -1538,51 +1574,64 @@ fn font_exists(dw: &IDWriteFactory, family: &str) -> bool {
     }
 }
 
-// A font dropped into "<install folder>\Fonts" (any .otf / .ttf) is used for all text.
+// Fonts live in "<install folder>\Fonts". The one in use is chosen with "> font" (saved as
+// "Font"); before that existed, the first font in the folder was used, so that still applies
+// while nothing has been chosen.
 fn load_custom_font(dw: &IDWriteFactory) -> Option<(IDWriteFontCollection, String)> {
-    let dir = format!("{}\\CustomStartMenu\\Fonts", games::known_folder_path(&FOLDERID_UserProgramFiles));
-    let mut files: Vec<String> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| {
-            let l = n.to_lowercase();
-            l.ends_with(".otf") || l.ends_with(".ttf")
-        })
-        .map(|n| format!("{}\\{}", dir, n))
-        .collect();
-    if files.is_empty() {
-        return None;
-    }
-    files.sort();
-    unsafe {
-        let f5: IDWriteFactory5 = dw.cast().ok()?;
-        let b = f5.CreateFontSetBuilder().ok()?;
-        for p in &files {
-            if let Ok(file) = f5.CreateFontFileReference(&HSTRING::from(p.as_str()), None) {
-                let _ = b.AddFontFile(&file);
+    let dir = fonts::fonts_dir();
+    *fonts::FONT_FILE.lock().unwrap() = String::new();
+    let file = match read_string(SETTINGS_KEY, w!("Font")) {
+        Some(chosen) => {
+            if chosen.is_empty() || !std::path::Path::new(&format!("{}\\{}", dir, chosen)).is_file() {
+                return None;
             }
+            chosen
         }
-        let set = b.CreateFontSet().ok()?;
-        let coll = f5.CreateFontCollectionFromFontSet(&set).ok()?;
-        if coll.GetFontFamilyCount() == 0 {
-            return None;
+        None => {
+            let mut files: Vec<String> = std::fs::read_dir(&dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| {
+                    let l = n.to_lowercase();
+                    l.ends_with(".otf") || l.ends_with(".ttf")
+                })
+                .collect();
+            files.sort();
+            files.into_iter().next()?
         }
-        let names = coll.GetFontFamily(0).ok()?.GetFamilyNames().ok()?;
-        let (mut idx, mut exists) = (0u32, BOOL(0));
-        let _ = names.FindLocaleName(w!("en-us"), &mut idx, &mut exists);
-        if !exists.as_bool() {
-            idx = 0;
-        }
-        let len = names.GetStringLength(idx).ok()? as usize;
-        let mut buf = vec![0u16; len + 1];
-        names.GetString(idx, &mut buf).ok()?;
-        let name = String::from_utf16_lossy(&buf[..len]);
-        if name.is_empty() {
-            return None;
-        }
-        Some((coll.cast().ok()?, name))
+    };
+    let res = unsafe {
+        (|| {
+            let f5: IDWriteFactory5 = dw.cast().ok()?;
+            let b = f5.CreateFontSetBuilder().ok()?;
+            let ff = f5.CreateFontFileReference(&HSTRING::from(format!("{}\\{}", dir, file)), None).ok()?;
+            b.AddFontFile(&ff).ok()?;
+            let set = b.CreateFontSet().ok()?;
+            let coll = f5.CreateFontCollectionFromFontSet(&set).ok()?;
+            if coll.GetFontFamilyCount() == 0 {
+                return None;
+            }
+            let names = coll.GetFontFamily(0).ok()?.GetFamilyNames().ok()?;
+            let (mut idx, mut exists) = (0u32, BOOL(0));
+            let _ = names.FindLocaleName(w!("en-us"), &mut idx, &mut exists);
+            if !exists.as_bool() {
+                idx = 0;
+            }
+            let len = names.GetStringLength(idx).ok()? as usize;
+            let mut buf = vec![0u16; len + 1];
+            names.GetString(idx, &mut buf).ok()?;
+            let name = String::from_utf16_lossy(&buf[..len]);
+            if name.is_empty() {
+                return None;
+            }
+            Some((coll.cast().ok()?, name))
+        })()
+    };
+    if res.is_some() {
+        *fonts::FONT_FILE.lock().unwrap() = file;
     }
+    res
 }
 
 // Set once at startup, before any text format is made (UI thread only).
@@ -1615,6 +1664,69 @@ fn make_format(dw: &IDWriteFactory, fam: &str, size: f32, weight: DWRITE_FONT_WE
     }
 }
 
+struct Formats {
+    text: IDWriteTextFormat,
+    hint: IDWriteTextFormat,
+    row: IDWriteTextFormat,
+    row_right: IDWriteTextFormat,
+    glyph: IDWriteTextFormat,
+    glyph_sm: IDWriteTextFormat,
+    header: IDWriteTextFormat,
+    card: IDWriteTextFormat,
+    tile: IDWriteTextFormat,
+    menu: IDWriteTextFormat,
+    placeholder: Option<IDWriteTextLayout>,
+}
+
+fn build_formats(dw: &IDWriteFactory) -> Formats {
+    unsafe { CUSTOM_FONT = load_custom_font(dw) };
+    let custom_fam = unsafe { CUSTOM_FONT.as_ref() }.map(|(_, n)| n.clone());
+    let fam: &str = match &custom_fam {
+        Some(n) => n.as_str(),
+        None if font_exists(dw, "Segoe UI Variable Text") => "Segoe UI Variable Text",
+        None => "Segoe UI",
+    };
+    let icons = if font_exists(dw, "Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
+    let text = make_format(dw, fam, FONT_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false);
+    let lang = read_string(SETTINGS_KEY, w!("Language")).unwrap_or_default();
+    let placeholder = PLACEHOLDERS
+        .iter()
+        .find(|(code, _)| lang.len() >= 2 && lang[..2].eq_ignore_ascii_case(code))
+        .map(|p| p.1)
+        .unwrap_or(PLACEHOLDERS[0].1);
+    let placeholder = unsafe { dw.CreateTextLayout(&ws(placeholder), &text, 10000.0, BAR_H).ok() };
+    Formats {
+        hint: make_format(dw, fam, HINT_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, true),
+        row: make_format(dw, fam, 14.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
+        row_right: make_format(dw, fam, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false),
+        glyph: make_format(dw, icons, 16.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false),
+        glyph_sm: make_format(dw, icons, 12.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false),
+        header: make_format(dw, fam, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false),
+        card: make_format(dw, fam, 12.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
+        tile: make_format(dw, fam, 11.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
+        menu: make_format(dw, fam, 13.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
+        text,
+        placeholder,
+    }
+}
+
+// After "> font" changes the font: every text format is made again.
+fn rebuild_formats() {
+    let s = st();
+    let f = build_formats(&s.dw);
+    s.fmt_text = f.text;
+    s.fmt_hint = f.hint;
+    s.fmt_row = f.row;
+    s.fmt_row_right = f.row_right;
+    s.fmt_glyph = f.glyph;
+    s.fmt_glyph_sm = f.glyph_sm;
+    s.fmt_header = f.header;
+    s.fmt_card = f.card;
+    s.fmt_tile = f.tile;
+    s.fmt_menu = f.menu;
+    s.placeholder_layout = f.placeholder;
+}
+
 fn make_gradient(a: D2D_POINT_2F, b: D2D_POINT_2F, ca: D2D1_COLOR_F, cb: D2D1_COLOR_F) -> Option<ID2D1LinearGradientBrush> {
     unsafe {
         let rt = st().rt.as_ref()?;
@@ -1636,6 +1748,7 @@ fn discard_device_resources() {
     s.bd_bmp = None;
     s.bd_dirty = !s.bd_px.is_empty();
     s.icon_bmps.clear();
+    s.fonts.bmps.clear();
     s.rt = None;
     s.dcrt = None;
     if let Some(ctx) = &s.ctx {
@@ -2578,6 +2691,8 @@ fn draw_panel(t_now: f64, dt: f32) {
     }
     if s.draw_mode == Mode::Themes {
         draw_theme_grid(top, dt, alpha, t_now);
+    } else if s.draw_mode == Mode::Fonts {
+        fonts::draw_grid(top, dt, alpha, t_now);
     } else {
         draw_rows(top, dt, alpha);
     }
@@ -3169,6 +3284,8 @@ fn run_command(cmd: usize) {
         CMD_GAMES => set_text(&ws("> games ")),
         CMD_PINS => set_text(&ws("> pins")),
         CMD_THEME => set_text(&ws("> theme")),
+        CMD_FONT => set_text(&ws("> font ")),
+        CMD_FONTFOLDER => fonts::open_folder(),
         CMD_EXPANDED => {
             s.expanded = !s.expanded;
             write_dword("Expanded", s.expanded as u32);
@@ -3187,6 +3304,7 @@ fn activate(force_raw: bool, admin: bool) {
     let q = trim(&s.text);
     match s.mode {
         Mode::Themes => apply_theme(s.sel.max(0) as usize),
+        Mode::Fonts => fonts::activate_sel(),
         Mode::Commands => {
             if s.sel >= 0 && (s.sel as usize) < s.cmd_list.len() {
                 run_command(s.cmd_list[s.sel as usize]);
@@ -3602,6 +3720,9 @@ fn on_key(vk: u16) {
         save_pins();
         return;
     }
+    if s.mode == Mode::Fonts && fonts::on_key(VIRTUAL_KEY(vk), shift) {
+        return;
+    }
     match VIRTUAL_KEY(vk) {
         VK_ESCAPE => dismiss(),
         VK_APPS => {
@@ -3949,6 +4070,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 s.sel = sel.clamp(0, (item_count() - 1).max(0));
             }
         }
+        WM_APP_FONT => {
+            let id = Box::from_raw(lp.0 as *mut String);
+            fonts::downloaded(&id, wp.0 != 0);
+        }
         WM_APP_PINS => {
             let s = st();
             let imported = IMPORTED_PINS.lock().unwrap().take().unwrap_or_default();
@@ -4011,6 +4136,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 return LRESULT(0);
             }
             if y > MARGIN + BAR_H {
+                if s.mode == Mode::Fonts {
+                    fonts::click(x, y);
+                    return LRESULT(0);
+                }
                 let idx = hit_item_at(x, y);
                 if idx >= 0 {
                     select(idx);
@@ -4065,6 +4194,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 for pp in s.pins.iter_mut() {
                     pp.placed = false;
                 }
+            } else if s.mode == Mode::Fonts {
+                fonts::wheel(steps);
             } else if is_app_list(s.mode) || s.mode == Mode::Commands {
                 let n = item_count();
                 let mr = MAX_ROWS as i32;
@@ -4136,6 +4267,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 return LRESULT(0);
             }
             s.hover_pin = pin_at(x, y);
+            fonts::hover(x, y);
             let idx = hit_item_at(x, y);
             if idx >= 0 {
                 select(idx);
@@ -4149,6 +4281,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let s = st();
             s.tracking_leave = false;
             s.hover_pin = -1;
+            s.fonts.btn_hot = -1;
+            s.fonts.default_hot = false;
         }
         WM_LBUTTONUP => {
             if GetCapture() == h {
@@ -4179,7 +4313,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let k = 96.0 / st().dpi;
             let (x, y) = (p.x as f32 * k, p.y as f32 * k - PINS_MAX_H);
             let text = !st().menu_open && x >= MARGIN + TEXT_X - 4.0 && x <= MARGIN + BAR_W && y >= MARGIN && y <= MARGIN + BAR_H;
-            if let Ok(cur) = LoadCursorW(HINSTANCE::default(), if text { IDC_IBEAM } else { IDC_ARROW }) {
+            let hand = !st().menu_open && fonts::hand_at(x, y);
+            if let Ok(cur) = LoadCursorW(HINSTANCE::default(), if text { IDC_IBEAM } else if hand { IDC_HAND } else { IDC_ARROW }) {
                 SetCursor(cur);
             }
             return LRESULT(1);
@@ -4227,38 +4362,24 @@ fn main() {
             }
         };
 
-        CUSTOM_FONT = load_custom_font(&dw);
-        let custom_fam = CUSTOM_FONT.as_ref().map(|(_, n)| n.clone());
-        let fam: &str = match &custom_fam {
-            Some(n) => n.as_str(),
-            None if font_exists(&dw, "Segoe UI Variable Text") => "Segoe UI Variable Text",
-            None => "Segoe UI",
-        };
-        let icons = if font_exists(&dw, "Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
-        let fmt_text = make_format(&dw, fam, FONT_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false);
-        let lang = read_string(SETTINGS_KEY, w!("Language")).unwrap_or_default();
-        let placeholder = PLACEHOLDERS
-            .iter()
-            .find(|(code, _)| lang.len() >= 2 && lang[..2].eq_ignore_ascii_case(code))
-            .map(|p| p.1)
-            .unwrap_or(PLACEHOLDERS[0].1);
-        let placeholder_layout = dw.CreateTextLayout(&ws(placeholder), &fmt_text, 10000.0, BAR_H).ok();
+        let fm = build_formats(&dw);
 
         let theme_idx = (read_dword("Theme", 0) as usize).min(THEME_COUNT - 1);
         // Hardware acceleration (Setup asks; on by default). Falls back to software if there
         // is no usable Direct3D 11 device at all.
         let hw = read_dword("HardwareAcceleration", 1) != 0 && create_d3d_device().is_some();
         let state = Box::new(State {
-            fmt_hint: make_format(&dw, fam, HINT_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, true),
-            fmt_row: make_format(&dw, fam, 14.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
-            fmt_row_right: make_format(&dw, fam, 13.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false),
-            fmt_glyph: make_format(&dw, icons, 16.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false),
-            fmt_header: make_format(&dw, fam, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false),
-            fmt_card: make_format(&dw, fam, 12.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
-            fmt_tile: make_format(&dw, fam, 11.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
-            fmt_menu: make_format(&dw, fam, 13.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
-            fmt_text,
-            placeholder_layout,
+            fmt_text: fm.text,
+            fmt_hint: fm.hint,
+            fmt_row: fm.row,
+            fmt_row_right: fm.row_right,
+            fmt_glyph: fm.glyph,
+            fmt_glyph_sm: fm.glyph_sm,
+            fmt_header: fm.header,
+            fmt_card: fm.card,
+            fmt_tile: fm.tile,
+            fmt_menu: fm.menu,
+            placeholder_layout: fm.placeholder,
             d2d,
             dw,
             hw,
@@ -4362,6 +4483,7 @@ fn main() {
             menu_hl: 0.0,
             menu_hl_init: false,
             prev_fg: HWND::default(),
+            fonts: fonts::FontUi { btn_hot: -1, ..Default::default() },
         });
         ST = Box::into_raw(state);
         *ICONS.lock().unwrap() = Some(IconCache { queue: VecDeque::new(), map: HashMap::new(), quit: false });
@@ -4414,6 +4536,8 @@ fn main() {
         QUIT_EVENT.store(quit_event.0 as isize, Relaxed);
         let uia_thread = std::thread::spawn(start_button_thread);
         let icon_thread = std::thread::spawn(icon_worker);
+        fonts::load_catalog();
+        fonts::start_workers();
         refresh_apps(true);
         if !load_pins() {
             start_import(); // first run: start from the Windows Start menu's pins
@@ -4456,6 +4580,7 @@ fn main() {
         }
         ICON_CV.notify_all();
         let _ = icon_thread.join();
+        fonts::stop_workers();
         // The UI Automation thread wakes on the quit event; don't wait long for it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while !uia_thread.is_finished() && std::time::Instant::now() < deadline {

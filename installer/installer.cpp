@@ -590,7 +590,7 @@ static double EaseInOutSine(double t) { return -(std::cos(3.14159265 * t) - 1) /
 static float Damp(float c, float t, float k, float dt) { return c + (t - c) * (1 - std::exp(-k * dt)); }
 static D2D1_COLOR_F Col(UINT32 rgb, float a = 1) { return ColorF(rgb, a); }
 
-// A font in "<install folder>\Fonts" (any .otf / .ttf) is used for all text, like in the app.
+// The font chosen in Custom Start ("<install folder>\Fonts") is used for all text, like in the app.
 static IDWriteFontCollection* g_fontColl;
 static std::wstring g_fontFamily;
 static void LoadCustomFont() {
@@ -608,6 +608,15 @@ static void LoadCustomFont() {
     FindClose(h);
     if (files.empty()) return;
     std::sort(files.begin(), files.end());
+    // the font picked with "> font" in Custom Start ("" = the Windows font); before that
+    // existed, the first font in the folder
+    wchar_t chosen[512] = {};
+    DWORD csz = sizeof(chosen);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"Font", RRF_RT_REG_SZ, nullptr, chosen, &csz) == ERROR_SUCCESS) {
+        std::wstring want = dir + L"\\" + chosen;
+        if (!chosen[0] || GetFileAttributesW(want.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+        files.assign(1, want);
+    } else files.resize(1);
     IDWriteFactory5* f5 = nullptr;
     IDWriteFontSetBuilder1* b = nullptr;
     IDWriteFontSet* set = nullptr;
@@ -1653,6 +1662,17 @@ static void UninstallWorker() {
             FindClose(fh);
         }
         RemoveDirectoryW(fonts.c_str());
+        // the "> font" card pictures
+        std::wstring previews = dir + L"\\Cache\\FontPreviews";
+        fh = FindFirstFileW((previews + L"\\*").c_str(), &fd);
+        if (fh != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileW((previews + L"\\" + fd.cFileName).c_str());
+            } while (FindNextFileW(fh, &fd));
+            FindClose(fh);
+        }
+        RemoveDirectoryW(previews.c_str());
+        RemoveDirectoryW((dir + L"\\Cache").c_str());
     }
     std::wstring programs = KnownFolder(FOLDERID_Programs);
     DeleteFileW((programs + L"\\Custom Start.lnk").c_str());

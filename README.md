@@ -45,7 +45,7 @@
     <td width="50%" valign="top">
       <img src="docs/images/commands.png" alt="Commands">
       <h3>Commands with <code>&gt;</code></h3>
-      Type <code>&gt;</code> to see your games, manage pinned apps, switch theme, turn the results list on or off, start with Windows, or quit. No settings window needed.
+      Type <code>&gt;</code> to see your games, manage pinned apps, switch theme or font, turn the results list on or off, start with Windows, or quit. No settings window needed.
     </td>
   </tr>
   <tr>
@@ -67,7 +67,7 @@
 - **Right-click menu.** Run as administrator, Open file location, Pin to Start and Pin to taskbar, on any app or pinned tile.
 - **All your games in one place.** `> games` finds the games on every drive (Steam, Epic, GOG, Ubisoft, Xbox, Riot, EA and more) and starts them. Type after it to filter.
 - **More than apps.** Type a path, a command or a URL and it runs or opens. Program names work too, so `cmd` finds Command Prompt. Anything else becomes a web search.
-- **Your font.** Drop a `.otf` or `.ttf` into the `Fonts` folder next to Custom Start (`%LOCALAPPDATA%\Programs\CustomStartMenu\Fonts`) and every bit of text uses it.
+- **Your font.** `> font` opens a picker with 477 free fonts (the whole SF Pro family, plus [open-fonts](https://github.com/kiwi0fruit/open-fonts) sorted into Sans Serif, Serif, Monospace, Math, Symbols & Emoji and fonts for other languages). Each card shows what the font looks like; nothing is downloaded until you click its Download button, and then every bit of text uses it. `> font NAME` searches, and `> fontfolder` opens the folder (`%LOCALAPPDATA%\Programs\CustomStartMenu\Fonts`) so you can add your own `.otf` / `.ttf` files.
 - **Stays out of your games.** Hardware acceleration (on by default) draws the bar on your graphics card. It opens on top of fullscreen games and <kbd>Esc</kbd> hands the keyboard straight back. While a game is in front, Custom Start stops watching the mouse and holds update prompts until you're done.
 - **Two native backends.** Pick **C++** or **Rust** when you install. Both look and behave the same.
 - **Speaks your language.** English, Español, Français, Deutsch, Italiano, Português, Русский, 日本語, 中文 and 한국어.
@@ -121,7 +121,7 @@ Uninstall any time from **Settings → Apps**.
 | Right-click · <kbd>Menu</kbd> key | App menu (administrator, file location, pin) |
 | Drag a pinned tile | Reorder pinned apps |
 | <kbd>Esc</kbd> | Close |
-| `> games` · `> pins` · `> theme` · `> expanded` · `> startup` · `> quit` | Commands |
+| `> games` · `> pins` · `> theme` · `> font` · `> fontfolder` · `> expanded` · `> startup` · `> quit` | Commands |
 
 ## 📊 Analytics
 

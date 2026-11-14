@@ -187,12 +187,14 @@ static const CmdDef kCmds[] = {
     {L"games", L"Games", L""},
     {L"pins", L"Pinned apps", L""},
     {L"theme", L"Theme", L""},
+    {L"font", L"Font", L"\xE8D2"},
+    {L"fontfolder", L"Open font folder", L"\xE838"},
     {L"expanded", L"Expanded results", L""},
     {L"startup", L"Start with Windows", L""},
     {L"quit", L"Quit Custom Start", L""},
 };
 constexpr int kCmdCount = (int)(sizeof(kCmds) / sizeof(kCmds[0]));
-enum { CMD_GAMES, CMD_PINS, CMD_THEME, CMD_EXPANDED, CMD_STARTUP, CMD_QUIT };
+enum { CMD_GAMES, CMD_PINS, CMD_THEME, CMD_FONT, CMD_FONTFOLDER, CMD_EXPANDED, CMD_STARTUP, CMD_QUIT };
 
 static const wchar_t* kClassName = L"CustomStartMenu.CommandBar";
 // Placeholder in the language chosen in Setup (HKCU\Software\CustomStartMenu\Language).
@@ -222,12 +224,13 @@ constexpr int kBackdropScale = 4;                   // backdrop is blurred at 1/
 #define WM_APP_QUIT (WM_APP + 5)  // sent by CSMInstaller before replacing the exe
 #define WM_APP_GAMES (WM_APP + 6)
 #define WM_APP_PINS (WM_APP + 7)
+#define WM_APP_FONT (WM_APP + 8)  // a font finished downloading
 #define TIMER_UPDATE_CHECK 1
 
 enum { ID_OPEN = 1, ID_AUTOSTART, ID_INTERCEPT, ID_EXPANDED, ID_EXIT, ID_THEME0 = 100 };
 
 // Results, Games and Pins are all lists of apps (g_results).
-enum class Mode { None, Results, Commands, Themes, Games, Pins };
+enum class Mode { None, Results, Commands, Themes, Games, Pins, Fonts };
 static bool IsAppList(Mode m) { return m == Mode::Results || m == Mode::Games || m == Mode::Pins; }
 
 template <class T>
@@ -247,7 +250,7 @@ static HICON g_trayIcon;
 static ID2D1Factory1* g_d2d;
 static IDWriteFactory* g_dw;
 static IDWriteTextFormat *g_fmtText, *g_fmtHint, *g_fmtRow, *g_fmtRowRight, *g_fmtGlyph, *g_fmtHeader, *g_fmtCard,
-    *g_fmtTile, *g_fmtMenu;
+    *g_fmtTile, *g_fmtMenu, *g_fmtGlyphSm;
 static IDWriteTextLayout* g_placeholderLayout;
 
 // Rendering backends. Hardware acceleration (the default, chosen in Setup) draws on the GPU
@@ -411,6 +414,9 @@ static HWND g_prevFg = nullptr;
 // custom font (any .otf / .ttf in the install folder's Fonts directory)
 static IDWriteFontCollection* g_fontColl;
 static std::wstring g_fontFamily;
+static std::wstring g_fontFile;  // the font in use, a file in the Fonts folder ("" = the Windows font)
+static int g_fontBtnHot = -1;    // Download button under the mouse
+static bool g_fontDefaultHot = false;
 static SRWLOCK g_appsLock = SRWLOCK_INIT;
 static std::vector<App> g_apps;
 static std::atomic<bool> g_appsLoading{false};
@@ -490,6 +496,22 @@ static DWORD ReadDword(const wchar_t* name, DWORD def) {
         return v;
     return def;
 }
+static bool ReadString(const wchar_t* name, std::wstring& out) {
+    wchar_t buf[512];
+    DWORD sz = sizeof(buf);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_SZ, nullptr, buf, &sz) != ERROR_SUCCESS)
+        return false;
+    out = buf;
+    return true;
+}
+static void WriteString(const wchar_t* name, const std::wstring& v) {
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) ==
+        ERROR_SUCCESS) {
+        RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+}
 static void WriteDword(const wchar_t* name, DWORD v) {
     HKEY k;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) ==
@@ -535,6 +557,18 @@ static void ApplyTheme(int idx) {
 // App index (shell:AppsFolder covers both Win32 and Store apps)
 // ---------------------------------------------------------------------------
 static void UpdateState();
+// fonts (fonts.inl)
+static void BuildFontList(const std::wstring& filter);
+static void FontEnter();
+static int FontCount();
+static float FontPanelH();
+static void FontScrollTo(float off, bool instant);
+static void FontActivateSel();
+static void OpenFontFolder();
+static std::wstring FontDisplayName(const std::wstring& file);
+static void ReleaseFontBitmaps();
+static void Hide();
+static int HitItemAt(float x, float y);
 
 static DWORD WINAPI AppsThread(LPVOID) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -1316,6 +1350,7 @@ static std::wstring CommandDetail(int c) {
         return hidden ? std::to_wstring(hidden) + L" hidden" : std::to_wstring(g_pins.size());
     }
     case CMD_THEME: return kThemes[g_themeIdx].name;
+    case CMD_FONT: return FontDisplayName(g_fontFile);
     case CMD_EXPANDED: return g_expanded ? L"On" : L"Off";
     case CMD_STARTUP: return g_autostart ? L"On" : L"Off";
     }
@@ -1353,6 +1388,9 @@ static void UpdateState() {
         auto word = [&](const wchar_t* w) { return q == w || StartsWith(q, std::wstring(w) + L" "); };
         if (q == L"theme" || q == L"themes" || StartsWith(q, L"theme ")) {
             g_mode = Mode::Themes;
+        } else if (word(L"font") || word(L"fonts")) {
+            g_mode = Mode::Fonts;
+            BuildFontList(Trim(q.substr(word(L"fonts") ? 5 : 4)));
         } else if (word(L"games") || word(L"game")) {
             g_mode = Mode::Games;
             std::wstring f = Trim(q.substr(q.find(L"game") + (word(L"games") ? 5 : 4)));
@@ -1403,6 +1441,7 @@ static void UpdateState() {
     if (g_mode != old) {
         if (old == Mode::Themes) SetPreview(g_themeIdx);  // leaving without applying reverts the preview
         g_sel = (g_mode == Mode::Themes) ? g_themeIdx : 0;
+        if (g_mode == Mode::Fonts) FontEnter();
         if (g_mode != Mode::None) {
             if (old == Mode::None) g_contentA = 0;
             else g_contentA = std::min(g_contentA, 0.35f);
@@ -1414,6 +1453,9 @@ static void UpdateState() {
     } else if (IsAppList(g_mode) || g_mode == Mode::Commands) {
         g_sel = 0;
         g_listTop = 0;
+    } else if (g_mode == Mode::Fonts) {
+        g_sel = 0;
+        FontScrollTo(0, true);
     }
     RecomputeGhost();
 
@@ -1429,6 +1471,7 @@ static int ItemCount() {
     case Mode::Pins: return (int)g_results.size();
     case Mode::Commands: return (int)g_cmdList.size();
     case Mode::Themes: return kThemeCount;
+    case Mode::Fonts: return FontCount();
     default: return 0;
     }
 }
@@ -1448,6 +1491,7 @@ static float PanelTargetH() {
         return PanelPad * 2 + RowH * std::clamp((int)g_results.size(), 1, MaxRows);
     case Mode::Commands: return g_cmdList.empty() ? 0.f : PanelPad * 2 + RowH * g_cmdList.size();
     case Mode::Themes: return ThemeGridHeight();
+    case Mode::Fonts: return FontPanelH();
     default: return 0.f;
     }
 }
@@ -1698,61 +1742,67 @@ static bool FontExists(const wchar_t* family) {
     return exists != FALSE;
 }
 
-// A font dropped into "<install folder>\Fonts" (any .otf / .ttf) is used for all text.
+// Fonts live in "<install folder>\Fonts". The one in use is chosen with "> font" (saved as
+// "Font"); before that existed, the first font in the folder was used, so that still applies
+// while nothing has been chosen.
 static std::wstring FontsDir() { return KnownFolderPath(FOLDERID_UserProgramFiles) + L"\\CustomStartMenu\\Fonts"; }
 
 static void LoadCustomFont() {
-    std::wstring dir = FontsDir();
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    std::vector<std::wstring> files;
-    do {
-        std::wstring n = Lower(fd.cFileName);
-        if (n.size() > 4 && (n.compare(n.size() - 4, 4, L".otf") == 0 || n.compare(n.size() - 4, 4, L".ttf") == 0))
-            files.push_back(dir + L"\\" + fd.cFileName);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    if (files.empty()) return;
-    std::sort(files.begin(), files.end());
+    std::wstring dir = FontsDir(), chosen;
+    g_fontFile.clear();
+    if (ReadString(L"Font", chosen)) {
+        if (chosen.empty() || !FileExists(dir + L"\\" + chosen)) return;
+        g_fontFile = chosen;
+    } else {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        std::vector<std::wstring> files;
+        do {
+            std::wstring n = Lower(fd.cFileName);
+            if (n.size() > 4 && (n.compare(n.size() - 4, 4, L".otf") == 0 || n.compare(n.size() - 4, 4, L".ttf") == 0))
+                files.push_back(fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        if (files.empty()) return;
+        std::sort(files.begin(), files.end());
+        g_fontFile = files[0];
+    }
 
     IDWriteFactory5* f5 = nullptr;
     IDWriteFontSetBuilder1* b = nullptr;
+    IDWriteFontFile* file = nullptr;
     IDWriteFontSet* set = nullptr;
     IDWriteFontCollection1* coll = nullptr;
-    if (SUCCEEDED(g_dw->QueryInterface(IID_PPV_ARGS(&f5))) && SUCCEEDED(f5->CreateFontSetBuilder(&b))) {
-        for (auto& p : files) {
-            IDWriteFontFile* file = nullptr;
-            if (SUCCEEDED(f5->CreateFontFileReference(p.c_str(), nullptr, &file))) {
-                b->AddFontFile(file);
-                file->Release();
+    std::wstring path = dir + L"\\" + g_fontFile;
+    if (SUCCEEDED(g_dw->QueryInterface(IID_PPV_ARGS(&f5))) && SUCCEEDED(f5->CreateFontSetBuilder(&b)) &&
+        SUCCEEDED(f5->CreateFontFileReference(path.c_str(), nullptr, &file)) && SUCCEEDED(b->AddFontFile(file)) &&
+        SUCCEEDED(b->CreateFontSet(&set)) && SUCCEEDED(f5->CreateFontCollectionFromFontSet(set, &coll)) &&
+        coll->GetFontFamilyCount() > 0) {
+        IDWriteFontFamily* fam = nullptr;
+        IDWriteLocalizedStrings* names = nullptr;
+        if (SUCCEEDED(coll->GetFontFamily(0, &fam)) && SUCCEEDED(fam->GetFamilyNames(&names))) {
+            UINT32 idx = 0, len = 0;
+            BOOL exists = FALSE;
+            names->FindLocaleName(L"en-us", &idx, &exists);
+            if (!exists) idx = 0;
+            names->GetStringLength(idx, &len);
+            std::wstring n(len + 1, L'\0');
+            names->GetString(idx, &n[0], len + 1);
+            n.resize(len);
+            if (!n.empty()) {
+                g_fontFamily = n;
+                g_fontColl = coll;
+                coll = nullptr;
             }
         }
-        if (SUCCEEDED(b->CreateFontSet(&set)) && SUCCEEDED(f5->CreateFontCollectionFromFontSet(set, &coll)) &&
-            coll->GetFontFamilyCount() > 0) {
-            IDWriteFontFamily* fam = nullptr;
-            IDWriteLocalizedStrings* names = nullptr;
-            if (SUCCEEDED(coll->GetFontFamily(0, &fam)) && SUCCEEDED(fam->GetFamilyNames(&names))) {
-                UINT32 idx = 0, len = 0;
-                BOOL exists = FALSE;
-                names->FindLocaleName(L"en-us", &idx, &exists);
-                if (!exists) idx = 0;
-                names->GetStringLength(idx, &len);
-                std::wstring n(len + 1, L'\0');
-                names->GetString(idx, &n[0], len + 1);
-                n.resize(len);
-                if (!n.empty()) {
-                    g_fontFamily = n;
-                    g_fontColl = coll;
-                    coll = nullptr;
-                }
-            }
-            SafeRelease(names);
-            SafeRelease(fam);
-        }
+        SafeRelease(names);
+        SafeRelease(fam);
     }
+    if (!g_fontColl) g_fontFile.clear();
     SafeRelease(coll);
     SafeRelease(set);
+    SafeRelease(file);
     SafeRelease(b);
     SafeRelease(f5);
 }
@@ -1789,6 +1839,7 @@ static void CreateTextResources() {
     g_fmtRow = MakeFormat(fam, 14.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
     g_fmtRowRight = MakeFormat(fam, 13.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false);
     g_fmtGlyph = MakeFormat(icons, 16.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+    g_fmtGlyphSm = MakeFormat(icons, 12.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
     g_fmtHeader = MakeFormat(fam, 12.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false);
     g_fmtCard = MakeFormat(fam, 12.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true);
     g_fmtTile = MakeFormat(fam, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true);
@@ -1826,6 +1877,7 @@ static void DiscardDeviceResources() {
         std::lock_guard<std::mutex> lk(g_iconMx);
         for (auto& kv : g_icons) SafeRelease(kv.second.bmp);
     }
+    ReleaseFontBitmaps();
     g_rt = nullptr;
     SafeRelease(g_dcrt);
     if (g_ctx) g_ctx->SetTarget(nullptr);
@@ -2533,6 +2585,8 @@ static void DrawThemeGrid(float top, float dt, float alpha, double now) {
     }
 }
 
+#include "fonts.inl"
+
 static void DrawPanel(double now, float dt) {
     using namespace Lay;
     if (g_panelH < 0.5f || g_drawMode == Mode::None) return;
@@ -2547,6 +2601,7 @@ static void DrawPanel(double now, float dt) {
     g_rt->PushAxisAlignedClip(D2D1::RectF(Margin, top + 1, Margin + BarW, top + g_panelH),
                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     if (g_drawMode == Mode::Themes) DrawThemeGrid(top, dt, alpha, now);
+    else if (g_drawMode == Mode::Fonts) DrawFontGrid(top, dt, alpha, now);
     else DrawRows(top, dt, alpha);
     g_rt->PopAxisAlignedClip();
 }
@@ -2986,6 +3041,8 @@ static void RunCommand(int c) {
     case CMD_GAMES: SetText(L"> games "); break;
     case CMD_PINS: SetText(L"> pins"); break;
     case CMD_THEME: SetText(L"> theme"); break;
+    case CMD_FONT: SetText(L"> font "); break;
+    case CMD_FONTFOLDER: OpenFontFolder(); break;
     case CMD_EXPANDED:
         g_expanded = !g_expanded;
         WriteDword(L"Expanded", g_expanded ? 1 : 0);
@@ -3000,6 +3057,7 @@ static void Activate(bool forceRaw, bool admin) {
     std::wstring q = Trim(g_text);
     switch (g_mode) {
     case Mode::Themes: ApplyTheme(g_sel); return;
+    case Mode::Fonts: FontActivateSel(); return;
     case Mode::Commands:
         if (g_sel >= 0 && g_sel < (int)g_cmdList.size()) RunCommand(g_cmdList[g_sel]);
         return;
@@ -3282,6 +3340,7 @@ static void OnKey(WPARAM vk) {
         SavePins();
         return;
     }
+    if (g_mode == Mode::Fonts && FontKey(vk, shift)) return;
     switch (vk) {
     case VK_ESCAPE: Dismiss(); break;
     case VK_APPS:  // the keyboard's menu key opens the right-click menu for the selection
@@ -3522,6 +3581,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             g_sel = std::clamp(sel, 0, std::max(0, ItemCount() - 1));
         }
         return 0;
+    case WM_APP_FONT: {
+        auto* id = reinterpret_cast<std::wstring*>(lp);
+        FontDownloaded(*id, wp != 0);
+        delete id;
+        return 0;
+    }
     case WM_APP_PINS: {
         auto* pins = reinterpret_cast<std::vector<App>*>(lp);
         if (g_pins.empty()) {
@@ -3578,6 +3643,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (x < Margin || x > Margin + BarW || y < Margin || y > Margin + BarH + g_panelH) { Hide(); return 0; }
         if (y > Margin + BarH) {
+            if (g_mode == Mode::Fonts) {
+                FontClick(x, y);
+                return 0;
+            }
             int idx = HitItemAt(x, y);
             if (idx >= 0) {
                 Select(idx);
@@ -3623,6 +3692,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (y < Lay::Margin) {  // over the pins: page through rows
             g_pinRowOff = std::clamp(g_pinRowOff + (steps > 0 ? 1 : -1), 0, std::max(0, PinRowsTotal() - PinRowsShown()));
             for (auto& pp : g_pins) pp.placed = false;
+        } else if (g_mode == Mode::Fonts) {
+            FontWheel(steps);
         } else if (IsAppList(g_mode) || g_mode == Mode::Commands) {
             int n = ItemCount();
             g_listTop = std::clamp(g_listTop + steps * 3, 0, std::max(0, n - Lay::MaxRows));
@@ -3677,6 +3748,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         g_hoverPin = PinAt(x, y);
+        FontHover(x, y);
         int idx = HitItemAt(x, y);
         if (idx >= 0) Select(idx);
         if (!g_trackingLeave) {
@@ -3688,6 +3760,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
         g_trackingLeave = false;
         g_hoverPin = -1;
+        g_fontBtnHot = -1;
+        g_fontDefaultHot = false;
         return 0;
     case WM_LBUTTONUP: {
         if (GetCapture() == h) ReleaseCapture();
@@ -3714,7 +3788,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         float s = 96.f / g_dpi, x = p.x * s, y = p.y * s - Lay::PinsMaxH;
         using namespace Lay;
         bool text = !g_menuOpen && x >= Margin + TextX - 4 && x <= Margin + BarW && y >= Margin && y <= Margin + BarH;
-        SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : IDC_ARROW));
+        SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : (!g_menuOpen && FontHandAt(x, y)) ? IDC_HAND : IDC_ARROW));
         return TRUE;
     }
     case WM_DPICHANGED: return 0;  // sizing is handled when the bar is shown
@@ -3759,6 +3833,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         return 1;
     }
     CreateTextResources();
+    LoadFontCatalog();
     g_memDC = CreateCompatibleDC(nullptr);
 
     int iconSize = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem());
@@ -3792,6 +3867,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     g_quitEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE uiaThread = CreateThread(nullptr, 0, StartButtonThread, nullptr, 0, nullptr);
     std::thread iconThread(IconWorker);
+    StartPreviewWorkers();
     RefreshApps(true);
     if (!LoadPins()) {  // first run: start from the Windows Start menu's pins
         HANDLE t = CreateThread(nullptr, 0, ImportPinsThread, nullptr, 0, nullptr);
@@ -3833,6 +3909,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     }
     g_iconCv.notify_all();
     iconThread.join();
+    StopPreviewWorkers();
     if (uiaThread) {
         WaitForSingleObject(uiaThread, 3000);
         CloseHandle(uiaThread);
@@ -3846,8 +3923,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     DiscardDeviceResources();
     SafeRelease(g_placeholderLayout);
     for (auto* f : {g_fmtText, g_fmtHint, g_fmtRow, g_fmtRowRight, g_fmtGlyph, g_fmtHeader, g_fmtCard, g_fmtTile,
-                    g_fmtMenu})
+                    g_fmtMenu, g_fmtGlyphSm})
         if (f) f->Release();
+    for (auto& kv : g_localFontFmt) SafeRelease(kv.second);
     SafeRelease(g_fontColl);
     SafeRelease(g_dw);
     SafeRelease(g_d2d);

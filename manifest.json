@@ -1,11 +1,22 @@
 {
-  "version": "1.2.1",
+  "version": "1.3.0",
   "assets": {
     "cpp": "CSM-cpp.exe",
     "rust": "CSM-rust.exe",
     "installer": "CSMInstaller.exe"
   },
   "releases": [
+    {
+      "version": "1.3.0",
+      "added": [
+        "> font opens a font picker: 477 free fonts with a preview of each, sorted into categories (SF Pro first, then Sans Serif, Serif, Monospace, Math, Symbols & Emoji and fonts for other languages)",
+        "Fonts are only downloaded when you click their Download button, and are used right away",
+        "> font NAME searches the fonts, and every font has a clean name (\"SF Pro Display Black Italic\", not \"SF-Pro-Display-BlackItalic.otf\")",
+        "> fontfolder opens the Fonts folder in File Explorer; fonts you put there show up under On this PC",
+        "Use default font switches back to the Windows font"
+      ],
+      "removed": []
+    },
     {
       "version": "1.2.1",
       "added": [
