@@ -45,7 +45,7 @@
     <td width="50%" valign="top">
       <img src="docs/images/commands.png" alt="Commands">
       <h3>Commands with <code>&gt;</code></h3>
-      Type <code>&gt;</code> to switch theme, turn the results list on or off, start with Windows, or quit. No settings window needed.
+      Type <code>&gt;</code> to see your games, manage pinned apps, switch theme, turn the results list on or off, start with Windows, or quit. No settings window needed.
     </td>
   </tr>
   <tr>
@@ -63,8 +63,12 @@
 </table>
 
 - **Replaces the Start menu.** <kbd>Win</kbd>, <kbd>Ctrl</kbd>+<kbd>Esc</kbd> and the Start button all open Custom Start, while shortcuts like <kbd>Win</kbd>+<kbd>E</kbd> and <kbd>Win</kbd>+<kbd>R</kbd> keep working.
-- **More than apps.** Type a path, a command or a URL and it runs or opens. Anything else becomes a web search.
-- **Stays out of your games.** Hardware acceleration (on by default) draws the bar on your graphics card. While a game or other fullscreen app is in front, Custom Start stops watching the mouse and holds update prompts until you're done.
+- **Your pinned apps, above the bar.** The apps pinned to your Windows Start menu come along as tiles, with names under the icons. Drag them to reorder, right-click to hide or unpin, and type `> pins` to bring hidden ones back.
+- **Right-click menu.** Run as administrator, Open file location, Pin to Start and Pin to taskbar, on any app or pinned tile.
+- **All your games in one place.** `> games` finds the games on every drive (Steam, Epic, GOG, Ubisoft, Xbox, Riot, EA and more) and starts them. Type after it to filter.
+- **More than apps.** Type a path, a command or a URL and it runs or opens. Program names work too, so `cmd` finds Command Prompt. Anything else becomes a web search.
+- **Your font.** Drop a `.otf` or `.ttf` into the `Fonts` folder next to Custom Start (`%LOCALAPPDATA%\Programs\CustomStartMenu\Fonts`) and every bit of text uses it.
+- **Stays out of your games.** Hardware acceleration (on by default) draws the bar on your graphics card. It opens on top of fullscreen games and <kbd>Esc</kbd> hands the keyboard straight back. While a game is in front, Custom Start stops watching the mouse and holds update prompts until you're done.
 - **Two native backends.** Pick **C++** or **Rust** when you install. Both look and behave the same.
 - **Speaks your language.** English, Español, Français, Deutsch, Italiano, Português, Русский, 日本語, 中文 and 한국어.
 - **Stays up to date.** New versions show up on their own, with a clear list of what changed.
@@ -113,9 +117,11 @@ Uninstall any time from **Settings → Apps**.
 | <kbd>Shift</kbd>+<kbd>Enter</kbd> | Run exactly what you typed |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> | Run as administrator |
 | <kbd>Tab</kbd> · <kbd>→</kbd> | Accept the completion |
-| <kbd>↑</kbd> <kbd>↓</kbd> | Move through results |
+| <kbd>↑</kbd> <kbd>↓</kbd> · <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move through results |
+| Right-click · <kbd>Menu</kbd> key | App menu (administrator, file location, pin) |
+| Drag a pinned tile | Reorder pinned apps |
 | <kbd>Esc</kbd> | Close |
-| `> theme` · `> expanded` · `> startup` · `> quit` | Commands |
+| `> games` · `> pins` · `> theme` · `> expanded` · `> startup` · `> quit` | Commands |
 
 ## 📊 Analytics
 

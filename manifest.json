@@ -1,11 +1,24 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "assets": {
     "cpp": "CSM-cpp.exe",
     "rust": "CSM-rust.exe",
     "installer": "CSMInstaller.exe"
   },
   "releases": [
+    {
+      "version": "1.2.0",
+      "added": [
+        "Your pinned apps from the Windows Start menu now sit above the command bar, each with its name under the icon",
+        "Drag pinned apps to reorder them; right-click to hide or unpin them, and type > pins to show hidden ones again",
+        "Right-click any app for Run as administrator, Open file location, Pin to Start and Pin to taskbar",
+        "> games lists the games on all your drives (Steam, Epic, GOG, Ubisoft, Xbox, Riot, EA and more) and starts them",
+        "Typing a program's name finds it, so \"cmd\" brings up Command Prompt",
+        "Opens on top of fullscreen games, and Esc hands the keyboard back to the game",
+        "Use your own font: put a .otf or .ttf file in the Fonts folder where Custom Start is installed"
+      ],
+      "removed": []
+    },
     {
       "version": "1.1.0",
       "added": [

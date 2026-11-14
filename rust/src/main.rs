@@ -45,6 +45,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+mod games;
+mod pins;
+use games::{refresh_games, GAMES, GAMES_LOADING};
+use pins::*;
+
 // ---------------------------------------------------------------------------
 // Layout (device independent pixels)
 // ---------------------------------------------------------------------------
@@ -76,8 +81,27 @@ const CARD_PREVIEW_H: f32 = 70.0;
 const CARD_NAME_H: f32 = 28.0;
 const MAX_PANEL_H: f32 = PANEL_PAD * 2.0 + ROW_H * MAX_ROWS as f32;
 
+// Pinned apps: separate tiles above the bar
+const PIN_COLS: i32 = 7;
+const PIN_MAX_ROWS: i32 = 3;
+const TILE_GAP: f32 = 10.0;
+const TILE_W: f32 = (BAR_W - (PIN_COLS - 1) as f32 * TILE_GAP) / PIN_COLS as f32;
+const TILE_H: f32 = 80.0;
+const TILE_RADIUS: f32 = 12.0;
+const TILE_ICON: f32 = 32.0;
+const PINS_GAP: f32 = 14.0; // between the tiles and the bar
+const PINS_MAX_H: f32 = PIN_MAX_ROWS as f32 * TILE_H + (PIN_MAX_ROWS - 1) as f32 * TILE_GAP + PINS_GAP;
+
+// Right-click menu
+const MENU_W: f32 = 236.0;
+const MENU_ROW_H: f32 = 36.0;
+const MENU_PAD: f32 = 5.0;
+
+// The window always has room for the tallest pin area above the bar, so the bar (and the
+// blurred backdrop behind it) never moves when pins are added or hidden. Drawing happens in
+// "bar space", where the bar's top-left corner is (MARGIN, MARGIN) and the pins sit at y < MARGIN.
 const WIN_W: f32 = BAR_W + 2.0 * MARGIN;
-const WIN_MAX_H: f32 = BAR_H + MAX_PANEL_H + 2.0 * MARGIN;
+const WIN_MAX_H: f32 = PINS_MAX_H + BAR_H + MAX_PANEL_H + 2.0 * MARGIN;
 
 // ---------------------------------------------------------------------------
 // Themes
@@ -194,16 +218,20 @@ struct CmdDef {
     title: &'static str,
     glyph: &'static str, // Segoe Fluent Icons / MDL2
 }
-const CMDS: [CmdDef; 4] = [
+const CMDS: [CmdDef; 6] = [
+    CmdDef { key: "games", title: "Games", glyph: "\u{E7FC}" },
+    CmdDef { key: "pins", title: "Pinned apps", glyph: "\u{E718}" },
     CmdDef { key: "theme", title: "Theme", glyph: "\u{E790}" },
     CmdDef { key: "expanded", title: "Expanded results", glyph: "\u{E8FD}" },
     CmdDef { key: "startup", title: "Start with Windows", glyph: "\u{E7E8}" },
     CmdDef { key: "quit", title: "Quit Custom Start", glyph: "\u{E711}" },
 ];
-const CMD_THEME: usize = 0;
-const CMD_EXPANDED: usize = 1;
-const CMD_STARTUP: usize = 2;
-const CMD_QUIT: usize = 3;
+const CMD_GAMES: usize = 0;
+const CMD_PINS: usize = 1;
+const CMD_THEME: usize = 2;
+const CMD_EXPANDED: usize = 3;
+const CMD_STARTUP: usize = 4;
+const CMD_QUIT: usize = 5;
 
 const CLASS_NAME: PCWSTR = w!("CustomStartMenu.CommandBar");
 // Placeholder in the language chosen in Setup (HKCU\Software\CustomStartMenu\Language).
@@ -230,6 +258,9 @@ const WM_APP_TRAY: u32 = WM_APP + 2;
 const WM_APP_APPS: u32 = WM_APP + 3;
 const WM_APP_HIDE: u32 = WM_APP + 4;
 const WM_APP_QUIT: u32 = WM_APP + 5; // sent by CSMInstaller before replacing the exe
+const WM_APP_GAMES: u32 = WM_APP + 6;
+const WM_APP_PINS: u32 = WM_APP + 7;
+const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_UPDATE_CHECK: usize = 1;
 
 const ID_OPEN: usize = 1;
@@ -239,13 +270,27 @@ const ID_EXPANDED: usize = 4;
 const ID_EXIT: usize = 5;
 const ID_THEME0: usize = 100;
 
+// Results, Games and Pins are all lists of apps (State::results).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     None,
     Results,
     Commands,
     Themes,
+    Games,
+    Pins,
 }
+fn is_app_list(m: Mode) -> bool {
+    matches!(m, Mode::Results | Mode::Games | Mode::Pins)
+}
+
+// Right-click menu actions
+const MA_ADMIN: usize = 0;
+const MA_LOCATION: usize = 1;
+const MA_PIN_START: usize = 2;
+const MA_UNPIN_START: usize = 3;
+const MA_PIN_TASKBAR: usize = 4;
+const MA_HIDE: usize = 5;
 
 // ---------------------------------------------------------------------------
 // UTF-16 string helpers (text is kept as UTF-16 so indices match DirectWrite)
@@ -398,12 +443,51 @@ fn now() -> f64 {
 // ---------------------------------------------------------------------------
 // Shared (cross-thread) state
 // ---------------------------------------------------------------------------
+// target is one of: an AppsFolder parsing name (launched via shell:AppsFolder\...), an absolute
+// file path (exe, .lnk, .url) or a URL (steam://...). icon, when set, is a file to take the icon
+// from instead of the target. alias is the program's file name ("cmd" for Command Prompt).
 #[derive(Clone, Default)]
 struct App {
     name: WStr,
     lower: WStr,
     initials: WStr,
     target: WStr,
+    alias: WStr,
+    icon: WStr,
+    detail: WStr,
+}
+fn is_url_target(t: &[u16]) -> bool {
+    find(t, &ws("://")).is_some()
+}
+fn is_path_target(t: &[u16]) -> bool {
+    (t.len() > 2 && t[1] == b':' as u16 && t[2] == b'\\' as u16) || starts_with(t, &ws("\\\\"))
+}
+fn is_packaged_target(t: &[u16]) -> bool {
+    !is_url_target(t) && !is_path_target(t) && t.contains(&(b'!' as u16)) && !t.contains(&(b'\\' as u16))
+}
+fn icon_key_of(a: &App) -> &WStr {
+    if a.icon.is_empty() {
+        &a.target
+    } else {
+        &a.icon
+    }
+}
+
+// Gaussian-blurred rounded rectangle, drawn as a nine-slice so it fits any size.
+struct Shadow {
+    bmp: Option<ID2D1Bitmap>,
+    dpi: f32,
+    sigma: f32,
+    radius: f32,
+    offset_y: f32,
+    c: i32,
+    n: i32,
+    pad: i32,
+}
+impl Shadow {
+    const fn new(sigma: f32, radius: f32, offset_y: f32) -> Self {
+        Shadow { bmp: None, dpi: 0.0, sigma, radius, offset_y, c: 0, n: 0, pad: 0 }
+    }
 }
 
 static HWND_G: AtomicIsize = AtomicIsize::new(0);
@@ -463,6 +547,8 @@ struct State {
     fmt_glyph: IDWriteTextFormat,
     fmt_header: IDWriteTextFormat,
     fmt_card: IDWriteTextFormat,
+    fmt_tile: IDWriteTextFormat,
+    fmt_menu: IDWriteTextFormat,
     placeholder_layout: Option<IDWriteTextLayout>,
 
     // Rendering backends. Hardware acceleration (the default, chosen in Setup) draws on the
@@ -482,11 +568,8 @@ struct State {
     win_h: i32,
     solid: Option<ID2D1SolidColorBrush>,
     logo_brush: Option<ID2D1LinearGradientBrush>,
-    shadow_bmp: Option<ID2D1Bitmap>,
-    shadow_dpi: f32,
-    shadow_c: i32,
-    shadow_n: i32,
-    shadow_pad: i32,
+    bar_shadow: Shadow,
+    tile_shadow: Shadow,
 
     bd_px: Vec<u32>,
     bd_w: i32,
@@ -555,7 +638,41 @@ struct State {
     hint_time: f64,
 
     icon_px: i32,
+    tile_px: i32, // icon size on the pinned tiles
     icon_bmps: HashMap<String, (ID2D1Bitmap, f64)>,
+
+    // pinned apps (tiles above the bar, in this order)
+    pins: Vec<Pin>,
+    pin_row_off: i32, // first pin row shown (mouse wheel pages through more)
+    press_pin: i32,   // pin under the left button
+    dragging: bool,
+    press_pt: D2D_POINT_2F,
+    drag_pt: D2D_POINT_2F,
+    grab: D2D_POINT_2F,
+    hover_pin: i32,
+    pin_hits: Vec<(D2D_RECT_F, i32)>,
+    tracking_leave: bool,
+
+    games_at: f64,
+
+    // list scrolling (games can be longer than the panel)
+    list_off: f32,
+    sel_row: f32,
+    list_top: i32,
+
+    // right-click menu
+    menu: Vec<(usize, &'static str, &'static str)>, // action, glyph, text
+    menu_open: bool,
+    menu_app: App,
+    menu_pin: i32, // pin index when opened on a tile
+    menu_pos: D2D_POINT_2F,
+    menu_time: f64,
+    menu_sel: i32,
+    menu_hl: f32,
+    menu_hl_init: bool,
+
+    // focus to give back when the bar was opened over a game and is closed with Esc / Win
+    prev_fg: HWND,
 }
 
 static mut ST: *mut State = null_mut();
@@ -696,7 +813,18 @@ fn load_apps() -> Vec<App> {
                 let nv = pwstr_to_vec(*n);
                 if !nv.is_empty() {
                     let lw = lower(&nv);
-                    apps.push(App { initials: initials(&lw), lower: lw, name: nv, target: pwstr_to_vec(*p) });
+                    let target = pwstr_to_vec(*p);
+                    // "{System32}\cmd.exe" -> "cmd", so typing the program's name finds it
+                    let lt = lower(&target);
+                    let mut alias = Vec::new();
+                    if lt.len() > 4 && lt.ends_with(&ws(".exe")) {
+                        let sl = lt.iter().rposition(|&c| c == b'\\' as u16 || c == b'/' as u16).map(|i| i + 1).unwrap_or(0);
+                        alias = lt[sl..lt.len() - 4].to_vec();
+                        if alias == lw {
+                            alias.clear();
+                        }
+                    }
+                    apps.push(App { initials: initials(&lw), lower: lw, name: nv, target, alias, ..Default::default() });
                 }
             }
             if let Ok(n) = name {
@@ -740,8 +868,12 @@ fn refresh_apps(force: bool) {
 
 fn score(a: &App, q: &[u16]) -> i32 {
     let base;
+    let alias_hit = !a.alias.is_empty() && a.alias.as_slice() == q;
+    let alias_prefix = !a.alias.is_empty() && q.len() >= 2 && starts_with(&a.alias, q);
     match find(&a.lower, q) {
+        _ if alias_hit => base = 3600, // "cmd" -> Command Prompt
         Some(0) => base = 3000,
+        _ if alias_prefix => base = 2500,
         Some(p) => {
             let c = a.lower[p - 1];
             base = if is_space(c) || c == b'-' as u16 || c == b'(' as u16 || c == b'.' as u16 || c == b'_' as u16 {
@@ -772,10 +904,16 @@ fn score(a: &App, q: &[u16]) -> i32 {
 // Icons
 // ---------------------------------------------------------------------------
 fn load_icon_pixels(target: &str, size: i32) -> Option<(Vec<u32>, i32, i32)> {
+    let tw = ws(target);
+    if is_url_target(&tw) {
+        return None;
+    }
+    let path = if is_path_target(&tw) { target.to_string() } else { format!("shell:AppsFolder\\{}", target) };
+    let lp = path.to_lowercase();
+    let image = lp.ends_with(".jpg") || lp.ends_with(".png");
     unsafe {
-        let path = HSTRING::from(format!("shell:AppsFolder\\{}", target));
-        let f: IShellItemImageFactory = SHCreateItemFromParsingName(&path, None::<&IBindCtx>).ok()?;
-        let hb = f.GetImage(SIZE { cx: size, cy: size }, SIIGBF_ICONONLY).ok()?;
+        let f: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path), None::<&IBindCtx>).ok()?;
+        let hb = f.GetImage(SIZE { cx: size, cy: size }, if image { SIIGBF_RESIZETOFIT } else { SIIGBF_ICONONLY }).ok()?;
         let mut bm = BITMAP::default();
         GetObjectW(HGDIOBJ(hb.0), size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut c_void));
         let w = bm.bmWidth;
@@ -863,9 +1001,9 @@ fn icon_worker() {
 }
 
 // Returns the icon bitmap if loaded (and when it first appeared), else queues a load.
-fn get_icon(target: &[u16]) -> Option<(ID2D1Bitmap, f64)> {
+fn get_icon(target: &[u16], px: i32) -> Option<(ID2D1Bitmap, f64)> {
     let s = st();
-    let key = format!("{}|{}", String::from_utf16_lossy(target), s.icon_px);
+    let key = format!("{}|{}", String::from_utf16_lossy(target), if px > 0 { px } else { s.icon_px });
     if let Some(b) = s.icon_bmps.get(&key) {
         return Some(b.clone());
     }
@@ -901,7 +1039,21 @@ fn get_icon(target: &[u16]) -> Option<(ID2D1Bitmap, f64)> {
 // ---------------------------------------------------------------------------
 // State: what the panel shows for the current text
 // ---------------------------------------------------------------------------
-fn command_detail(c: usize) -> &'static str {
+fn command_detail(c: usize) -> String {
+    let s = st();
+    match c {
+        CMD_PINS => {
+            let hidden = s.pins.iter().filter(|p| p.hidden).count();
+            if hidden > 0 {
+                format!("{} hidden", hidden)
+            } else {
+                s.pins.len().to_string()
+            }
+        }
+        _ => command_detail_str(c).to_string(),
+    }
+}
+fn command_detail_str(c: usize) -> &'static str {
     let s = st();
     match c {
         CMD_THEME => THEMES[s.theme_idx].name,
@@ -962,8 +1114,30 @@ fn update_state() {
     let tl = lower(&trim(&s.text));
     if !tl.is_empty() && tl[0] == b'>' as u16 {
         let q = trim(&tl[1..]);
+        let word = |w: &str| q == ws(w) || starts_with(&q, &ws(&format!("{} ", w)));
         if q == ws("theme") || q == ws("themes") || starts_with(&q, &ws("theme ")) {
             s.mode = Mode::Themes;
+        } else if word("games") || word("game") {
+            s.mode = Mode::Games;
+            let skip = if word("games") { 5 } else { 4 };
+            let f = trim(&q[find(&q, &ws("game")).unwrap_or(0) + skip..]);
+            refresh_games();
+            let games = GAMES.read().unwrap();
+            if f.is_empty() {
+                s.results = games.clone();
+            } else {
+                let mut scored: Vec<(i32, usize)> =
+                    games.iter().enumerate().filter_map(|(i, a)| { let sc = score(a, &f); (sc > 0).then_some((sc, i)) }).collect();
+                scored.sort_by(|a, b| b.0.cmp(&a.0));
+                s.results = scored.iter().map(|&(_, i)| games[i].clone()).collect();
+            }
+        } else if word("pins") || word("pinned") {
+            s.mode = Mode::Pins;
+            for p in &s.pins {
+                let mut a = p.app.clone();
+                a.detail = ws(if p.hidden { "Hidden" } else { "Shown" });
+                s.results.push(a);
+            }
         } else {
             s.mode = Mode::Commands;
             for (i, cmd) in CMDS.iter().enumerate() {
@@ -1000,8 +1174,11 @@ fn update_state() {
             s.draw_mode = s.mode;
             s.sel_y_init = false;
         }
-    } else if s.mode == Mode::Results || s.mode == Mode::Commands {
+        s.list_top = 0;
+        s.list_off = 0.0;
+    } else if is_app_list(s.mode) || s.mode == Mode::Commands {
         s.sel = 0;
+        s.list_top = 0;
     }
     recompute_ghost();
 
@@ -1018,7 +1195,7 @@ fn update_state() {
 fn item_count() -> i32 {
     let s = st();
     match s.mode {
-        Mode::Results => s.results.len() as i32,
+        Mode::Results | Mode::Games | Mode::Pins => s.results.len() as i32,
         Mode::Commands => s.cmd_list.len() as i32,
         Mode::Themes => THEME_COUNT as i32,
         Mode::None => 0,
@@ -1034,6 +1211,8 @@ fn panel_target_h() -> f32 {
     let s = st();
     match s.mode {
         Mode::Results => PANEL_PAD * 2.0 + ROW_H * s.results.len() as f32,
+        // an empty list still shows one line ("Looking for games...")
+        Mode::Games | Mode::Pins => PANEL_PAD * 2.0 + ROW_H * s.results.len().clamp(1, MAX_ROWS) as f32,
         Mode::Commands => {
             if s.cmd_list.is_empty() {
                 0.0
@@ -1237,15 +1416,25 @@ unsafe extern "system" fn kbd_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
 }
 
 // Called on the UI thread whenever the bar moves or resizes.
+fn menu_h() -> f32 {
+    MENU_PAD * 2.0 + MENU_ROW_H * st().menu.len() as f32
+}
+
 fn publish_box() {
     let s = st();
     let sc = s.dpi / 96.0;
-    let left = s.win_pos.x + (MARGIN * sc) as i32;
-    let top = s.win_pos.y + (MARGIN * sc) as i32;
-    BOX_L.store(left, Relaxed);
-    BOX_T.store(top, Relaxed);
-    BOX_R.store(left + (BAR_W * sc) as i32, Relaxed);
-    BOX_B.store(top + ((BAR_H + s.panel_h) * sc) as i32, Relaxed);
+    // bar space -> window: y + PINS_MAX_H
+    let (mut l, mut t, mut r, mut b) = (MARGIN, MARGIN - pins_area_h(), MARGIN + BAR_W, MARGIN + BAR_H + s.panel_h);
+    if s.menu_open {
+        l = l.min(s.menu_pos.x);
+        r = r.max(s.menu_pos.x + MENU_W);
+        t = t.min(s.menu_pos.y);
+        b = b.max(s.menu_pos.y + menu_h());
+    }
+    BOX_L.store(s.win_pos.x + (l * sc) as i32, Relaxed);
+    BOX_T.store(s.win_pos.y + ((t + PINS_MAX_H) * sc) as i32, Relaxed);
+    BOX_R.store(s.win_pos.x + (r * sc) as i32, Relaxed);
+    BOX_B.store(s.win_pos.y + ((b + PINS_MAX_H) * sc) as i32, Relaxed);
 }
 
 fn post_hook_sync() {
@@ -1349,12 +1538,63 @@ fn font_exists(dw: &IDWriteFactory, family: &str) -> bool {
     }
 }
 
+// A font dropped into "<install folder>\Fonts" (any .otf / .ttf) is used for all text.
+fn load_custom_font(dw: &IDWriteFactory) -> Option<(IDWriteFontCollection, String)> {
+    let dir = format!("{}\\CustomStartMenu\\Fonts", games::known_folder_path(&FOLDERID_UserProgramFiles));
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            let l = n.to_lowercase();
+            l.ends_with(".otf") || l.ends_with(".ttf")
+        })
+        .map(|n| format!("{}\\{}", dir, n))
+        .collect();
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    unsafe {
+        let f5: IDWriteFactory5 = dw.cast().ok()?;
+        let b = f5.CreateFontSetBuilder().ok()?;
+        for p in &files {
+            if let Ok(file) = f5.CreateFontFileReference(&HSTRING::from(p.as_str()), None) {
+                let _ = b.AddFontFile(&file);
+            }
+        }
+        let set = b.CreateFontSet().ok()?;
+        let coll = f5.CreateFontCollectionFromFontSet(&set).ok()?;
+        if coll.GetFontFamilyCount() == 0 {
+            return None;
+        }
+        let names = coll.GetFontFamily(0).ok()?.GetFamilyNames().ok()?;
+        let (mut idx, mut exists) = (0u32, BOOL(0));
+        let _ = names.FindLocaleName(w!("en-us"), &mut idx, &mut exists);
+        if !exists.as_bool() {
+            idx = 0;
+        }
+        let len = names.GetStringLength(idx).ok()? as usize;
+        let mut buf = vec![0u16; len + 1];
+        names.GetString(idx, &mut buf).ok()?;
+        let name = String::from_utf16_lossy(&buf[..len]);
+        if name.is_empty() {
+            return None;
+        }
+        Some((coll.cast().ok()?, name))
+    }
+}
+
+// Set once at startup, before any text format is made (UI thread only).
+static mut CUSTOM_FONT: Option<(IDWriteFontCollection, String)> = None;
+
 fn make_format(dw: &IDWriteFactory, fam: &str, size: f32, weight: DWRITE_FONT_WEIGHT, align: DWRITE_TEXT_ALIGNMENT, ellipsis: bool) -> IDWriteTextFormat {
+    let coll = unsafe { CUSTOM_FONT.as_ref() }.filter(|(_, n)| n == fam).map(|(c, _)| c.clone());
     unsafe {
         let f = dw
             .CreateTextFormat(
                 &HSTRING::from(fam),
-                None::<&IDWriteFontCollection>,
+                coll.as_ref(),
                 weight,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
@@ -1388,11 +1628,13 @@ fn discard_device_resources() {
     let s = st();
     s.solid = None;
     s.logo_brush = None;
-    s.shadow_bmp = None;
+    s.bar_shadow.bmp = None;
+    s.bar_shadow.dpi = 0.0;
+    s.tile_shadow.bmp = None;
+    s.tile_shadow.dpi = 0.0;
     s.bd_brush = None;
     s.bd_bmp = None;
     s.bd_dirty = !s.bd_px.is_empty();
-    s.shadow_dpi = 0.0;
     s.icon_bmps.clear();
     s.rt = None;
     s.dcrt = None;
@@ -1533,16 +1775,16 @@ fn create_device_resources() -> bool {
 }
 
 // Gaussian-blurred rounded rectangle, drawn later as a nine-slice so it fits any size.
-fn build_shadow() {
+fn build_shadow(sh: &mut Shadow) {
     let s = st();
-    if s.shadow_bmp.is_some() && s.shadow_dpi == s.dpi {
+    if sh.bmp.is_some() && sh.dpi == s.dpi {
         return;
     }
-    s.shadow_bmp = None;
+    sh.bmp = None;
     let sc = s.dpi / 96.0;
-    let sigma = SHADOW_SIGMA * sc;
+    let sigma = sh.sigma * sc;
     let pad = (sigma * 3.0).ceil() as i32;
-    let rr = RADIUS * sc;
+    let rr = sh.radius * sc;
     let cc = pad + rr.ceil() as i32 + 2;
     let n = (2 * cc + 1) as usize;
     let mut a = vec![0f32; n * n];
@@ -1590,14 +1832,14 @@ fn build_shadow() {
     }
     unsafe {
         let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: pixel_format(), dpiX: 96.0, dpiY: 96.0 };
-        s.shadow_bmp = rt()
+        sh.bmp = rt()
             .CreateBitmap(D2D_SIZE_U { width: n as u32, height: n as u32 }, Some(px.as_ptr() as *const c_void), (n * 4) as u32, &bp)
             .ok();
     }
-    s.shadow_c = cc;
-    s.shadow_n = n as i32;
-    s.shadow_pad = pad;
-    s.shadow_dpi = s.dpi;
+    sh.c = cc;
+    sh.n = n as i32;
+    sh.pad = pad;
+    sh.dpi = s.dpi;
 }
 
 fn ensure_surface(w: i32, h: i32) {
@@ -1651,7 +1893,12 @@ fn position_on_monitor() {
     unsafe {
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
-        let mon = MonitorFromPoint(p, MONITOR_DEFAULTTOPRIMARY);
+        // Over a game, open on the game's screen (it may be holding the cursor somewhere else).
+        let mon = if !s.prev_fg.is_invalid() {
+            MonitorFromWindow(s.prev_fg, MONITOR_DEFAULTTOPRIMARY)
+        } else {
+            MonitorFromPoint(p, MONITOR_DEFAULTTOPRIMARY)
+        };
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(mon, &mut mi);
         let (mut dx, mut dy) = (96u32, 96u32);
@@ -1667,12 +1914,15 @@ fn position_on_monitor() {
             rt.SetDpi(s.dpi, s.dpi);
         }
         s.icon_px = (24.0 * sc).round() as i32;
+        s.tile_px = (TILE_ICON * sc).round() as i32;
 
-        // Centered horizontally, sitting a little above the vertical middle of the screen.
+        // Centered horizontally, sitting a little above the vertical middle of the screen, and
+        // lower if that's needed for the pinned tiles above it to fit.
         let wa = mi.rcWork;
-        let bar_center_y = wa.top + ((wa.bottom - wa.top) as f32 * VERTICAL_POS).round() as i32;
+        let mut bar_top = wa.top + ((wa.bottom - wa.top) as f32 * VERTICAL_POS - BAR_H / 2.0 * sc).round() as i32;
+        bar_top = bar_top.max(wa.top + ((pins_area_h() + 16.0) * sc).round() as i32);
         s.win_pos.x = (wa.left + wa.right) / 2 - w / 2;
-        s.win_pos.y = bar_center_y - ((MARGIN + BAR_H / 2.0) * sc).round() as i32;
+        s.win_pos.y = bar_top - ((MARGIN + PINS_MAX_H) * sc).round() as i32;
         s.win_h = -1; // hardware path: move/resize the window on the next frame
     }
 }
@@ -1851,19 +2101,19 @@ fn set_transform(m: &Matrix3x2) {
     unsafe { rt().SetTransform(m) };
 }
 
-fn draw_shadow(bx: D2D_RECT_F, opacity: f32) {
+fn draw_shadow(bx: D2D_RECT_F, opacity: f32, sh: &Shadow) {
     let s = st();
-    let Some(bmp) = s.shadow_bmp.as_ref() else { return };
+    let Some(bmp) = sh.bmp.as_ref() else { return };
     if opacity <= 0.001 {
         return;
     }
     let sc = s.dpi / 96.0;
-    let pad = s.shadow_pad as f32 / sc;
-    let cd = s.shadow_c as f32 / sc;
-    let o = rect(bx.left - pad, bx.top - pad + SHADOW_OFFSET_Y, bx.right + pad, bx.bottom + pad + SHADOW_OFFSET_Y);
+    let pad = sh.pad as f32 / sc;
+    let cd = sh.c as f32 / sc;
+    let o = rect(bx.left - pad, bx.top - pad + sh.offset_y, bx.right + pad, bx.bottom + pad + sh.offset_y);
     let dx = [o.left, o.left + cd, o.right - cd, o.right];
     let dy = [o.top, o.top + cd, o.bottom - cd, o.bottom];
-    let sx = [0.0, s.shadow_c as f32, s.shadow_c as f32 + 1.0, s.shadow_n as f32];
+    let sx = [0.0, sh.c as f32, sh.c as f32 + 1.0, sh.n as f32];
     unsafe {
         rt().SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED); // avoid seams between slices
         for j in 0..3 {
@@ -2051,21 +2301,49 @@ fn draw_layout(text: &[u16], fmt: &IDWriteTextFormat, x: f32, y: f32, w: f32, h:
     }
 }
 
-// List rows (results / commands) with a sliding selection highlight.
+// List rows (results / commands / games / pins) with a sliding selection highlight.
 fn draw_rows(top: f32, dt: f32, alpha: f32) {
     let s = st();
     let th = s.th;
-    let n = if s.draw_mode == Mode::Results { s.results.len() } else { s.cmd_list.len() } as i32;
+    let apps = is_app_list(s.draw_mode);
+    let n = if apps { s.results.len() } else { s.cmd_list.len() } as i32;
+    let t_now = now();
+    let mr = MAX_ROWS as i32;
     if n == 0 {
+        if s.draw_mode == Mode::Games || s.draw_mode == Mode::Pins {
+            let msg = if s.draw_mode == Mode::Pins {
+                "Nothing pinned yet. Right-click an app to pin it."
+            } else if GAMES_LOADING.load(Relaxed) {
+                "Looking for games on your drives…"
+            } else {
+                "No games found"
+            };
+            let a = alpha * clamp01(s.content_a as f64 * 1.4);
+            let glyph = if s.draw_mode == Mode::Pins { "\u{E718}" } else { "\u{E7FC}" };
+            draw_layout(&ws(glyph), &s.fmt_glyph, MARGIN + 20.0, top + PANEL_PAD, 24.0, ROW_H, with_a(th.dim, a));
+            draw_layout(&ws(msg), &s.fmt_row, MARGIN + 56.0, top + PANEL_PAD, BAR_W - 80.0, ROW_H, with_a(th.dim, a));
+        }
         return;
     }
     let sel = s.sel.clamp(0, n - 1);
-    let sel_target = top + PANEL_PAD + sel as f32 * ROW_H;
+    // keep the selection inside the visible window of rows
+    if sel < s.list_top {
+        s.list_top = sel;
+    }
+    if sel >= s.list_top + mr {
+        s.list_top = sel - mr + 1;
+    }
+    s.list_top = s.list_top.clamp(0, (n - mr).max(0));
+    s.list_off = damp(s.list_off, s.list_top as f32, 22.0, dt);
+    if (s.list_off - s.list_top as f32).abs() < 0.002 {
+        s.list_off = s.list_top as f32;
+    }
     if !s.sel_y_init {
-        s.sel_y = sel_target;
+        s.sel_row = sel as f32;
         s.sel_y_init = true;
     }
-    s.sel_y = damp(s.sel_y, sel_target, 26.0, dt);
+    s.sel_row = damp(s.sel_row, sel as f32, 26.0, dt);
+    s.sel_y = top + PANEL_PAD + (s.sel_row - s.list_off) * ROW_H;
 
     // highlight + accent pill
     fill_rr(rect(MARGIN + 6.0, s.sel_y + 2.0, MARGIN + BAR_W - 6.0, s.sel_y + ROW_H - 2.0), 8.0, with_a(th.highlight, alpha));
@@ -2075,33 +2353,46 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
         with_a(th.accent, alpha),
     );
 
-    let q = lower(&trim(&s.text));
-    let t_now = now();
-    for i in 0..n {
-        let slide = (1.0 - s.content_a) * (6.0 + i as f32 * 3.0);
-        let y = top + PANEL_PAD + i as f32 * ROW_H + slide;
-        let row_a = alpha * clamp01(s.content_a as f64 * 1.4 - i as f64 * 0.06);
+    let mut q = lower(&trim(&s.text));
+    if s.draw_mode == Mode::Games {
+        q = match q.iter().position(|&c| c == b' ' as u16) {
+            Some(sp) => trim(&q[sp + 1..]),
+            None => Vec::new(),
+        };
+    } else if s.draw_mode == Mode::Pins {
+        q.clear();
+    }
+    let first = (s.list_off.floor() as i32 - 1).max(0);
+    let last = n.min(s.list_off.ceil() as i32 + mr + 1);
+    for i in first..last {
+        let slide = (1.0 - s.content_a) * (6.0 + (i - first) as f32 * 3.0);
+        let y = top + PANEL_PAD + (i as f32 - s.list_off) * ROW_H + slide;
+        let row_a = alpha * clamp01(s.content_a as f64 * 1.4 - (i - first) as f64 * 0.06);
         s.hits.push((rect(MARGIN + 6.0, y, MARGIN + BAR_W - 6.0, y + ROW_H), i));
         let is_sel = i == sel;
         let ix = MARGIN + 20.0;
         let iy = y + (ROW_H - 24.0) / 2.0;
 
-        if s.draw_mode == Mode::Results {
+        if apps {
             let a = s.results[i as usize].clone();
-            let icon = get_icon(&a.target);
+            let icon = get_icon(icon_key_of(&a), 0);
             let io = match &icon {
                 Some((_, shown)) => ease_out_cubic(clamp01((t_now - shown) / 0.18) as f64) as f32,
                 None => 0.0,
             };
             if io < 1.0 {
                 fill_rr(rect(ix, iy, ix + 24.0, iy + 24.0), 6.0, with_a(th.highlight, row_a * (1.0 - io) * 1.5));
+                if s.draw_mode == Mode::Games {
+                    draw_layout(&ws("\u{E7FC}"), &s.fmt_glyph, ix, y, 24.0, ROW_H, with_a(th.dim, row_a * (1.0 - io)));
+                }
             }
             if let Some((bmp, _)) = &icon {
                 unsafe {
                     rt().DrawBitmap(bmp, Some(&rect(ix, iy, ix + 24.0, iy + 24.0)), row_a * io, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
                 };
             }
-            if let Some(l) = make_layout(&a.name, &s.fmt_row, BAR_W - 120.0, ROW_H) {
+            let hidden_pin = s.draw_mode == Mode::Pins && a.detail == ws("Hidden");
+            if let Some(l) = make_layout(&a.name, &s.fmt_row, BAR_W - 200.0, ROW_H) {
                 if !q.is_empty() {
                     if let Some(p) = find(&a.lower, &q) {
                         unsafe {
@@ -2109,11 +2400,50 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
                         }
                     }
                 }
-                set_color(with_a(if is_sel { th.text } else { lerp_c(th.dim, th.text, 0.55) }, row_a));
+                let mut col = if is_sel { th.text } else { lerp_c(th.dim, th.text, 0.55) };
+                if hidden_pin {
+                    col = th.dim;
+                }
+                set_color(with_a(col, row_a));
                 unsafe { rt().DrawTextLayout(pt(MARGIN + 56.0, y), &l, solid(), D2D1_DRAW_TEXT_OPTIONS_NONE) };
             }
-            if is_sel {
-                draw_layout(&ws("Open  ↵"), &s.fmt_row_right, MARGIN + BAR_W - 140.0, y, 120.0, ROW_H, with_a(th.dim, row_a));
+            let mut rc = th.dim;
+            let right: WStr = match s.draw_mode {
+                Mode::Results => {
+                    if is_sel {
+                        ws("Open  ↵")
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Mode::Games => {
+                    if is_sel {
+                        ws("Play  ↵")
+                    } else {
+                        a.detail.clone()
+                    }
+                }
+                _ => {
+                    if !hidden_pin && !is_sel {
+                        rc = th.accent;
+                    }
+                    if is_sel {
+                        ws(if hidden_pin { "Show  ↵" } else { "Hide  ↵" })
+                    } else {
+                        a.detail.clone()
+                    }
+                }
+            };
+            if !right.is_empty() {
+                draw_layout(
+                    &right,
+                    &s.fmt_row_right,
+                    MARGIN + BAR_W - 160.0,
+                    y,
+                    140.0,
+                    ROW_H,
+                    with_a(rc, row_a * if is_sel { 1.0 } else { 0.8 }),
+                );
             }
         } else {
             let cmd = s.cmd_list[i as usize];
@@ -2129,8 +2459,16 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
             );
             let d = command_detail(cmd);
             let on = d == "On";
-            draw_layout(&ws(d), &s.fmt_row_right, MARGIN + BAR_W - 180.0, y, 160.0, ROW_H, with_a(if on { th.accent } else { th.dim }, row_a));
+            draw_layout(&ws(&d), &s.fmt_row_right, MARGIN + BAR_W - 180.0, y, 160.0, ROW_H, with_a(if on { th.accent } else { th.dim }, row_a));
         }
+    }
+
+    // scroll bar when the list is longer than the panel
+    if n > mr {
+        let track_h = mr as f32 * ROW_H - 8.0;
+        let thumb_h = (track_h * mr as f32 / n as f32).max(24.0);
+        let ty = top + PANEL_PAD + 4.0 + (track_h - thumb_h) * (s.list_off / (n - mr) as f32);
+        fill_rr(rect(MARGIN + BAR_W - 6.0, ty, MARGIN + BAR_W - 3.0, ty + thumb_h), 1.5, with_a(th.dim, alpha * 0.45));
     }
 }
 
@@ -2246,6 +2584,184 @@ fn draw_panel(t_now: f64, dt: f32) {
     unsafe { rt().PopAxisAlignedClip() };
 }
 
+fn push_layer(opacity: f32) {
+    unsafe {
+        let lp = D2D1_LAYER_PARAMETERS {
+            contentBounds: rect(-f32::MAX, -f32::MAX, f32::MAX, f32::MAX),
+            geometricMask: ManuallyDrop::new(None),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: m_identity(),
+            opacity,
+            opacityBrush: ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS_NONE,
+        };
+        rt().PushLayer(&lp, None::<&ID2D1Layer>);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pinned tiles (above the bar)
+// ---------------------------------------------------------------------------
+fn draw_tile(pi: usize, alpha: f32, scale: f32, lift: f32, base: &Matrix3x2, t_now: f64) {
+    let s = st();
+    let th = s.th;
+    let p = s.pins[pi].clone();
+    let (x, y) = (p.x, p.y);
+    let r = rect(x, y, x + TILE_W, y + TILE_H);
+    set_transform(&m_mul(&m_scale(scale, scale, x + TILE_W / 2.0, y + TILE_H / 2.0), base));
+    let layer = alpha < 0.999;
+    if layer {
+        push_layer(alpha);
+    }
+    draw_shadow(r, th.shadow * (0.5 + 0.5 * lift), &s.tile_shadow);
+    let rr = rrect(r, TILE_RADIUS);
+    fill_acrylic(&rr, &th, y, y + TILE_H);
+    let hl = p.hover.max(lift);
+    if hl > 0.01 {
+        set_color(with_a(th.highlight, hl * 1.3));
+        unsafe { rt().FillRoundedRectangle(&rr, solid()) };
+    }
+    if let Some(b) = make_gradient(pt(0.0, y), pt(0.0, y + TILE_H), th.border_top, th.border_bottom) {
+        unsafe {
+            rt().DrawRoundedRectangle(
+                &rrect(rect(x + 0.5, y + 0.5, x + TILE_W - 0.5, y + TILE_H - 0.5), TILE_RADIUS - 0.5),
+                &b,
+                1.0,
+                None::<&ID2D1StrokeStyle>,
+            )
+        };
+    }
+    let ix = x + (TILE_W - TILE_ICON) / 2.0;
+    let iy = y + 12.0;
+    let icon = get_icon(icon_key_of(&p.app), s.tile_px);
+    let io = match &icon {
+        Some((_, shown)) => ease_out_cubic(clamp01((t_now - shown) / 0.18) as f64) as f32,
+        None => 0.0,
+    };
+    if io < 1.0 {
+        fill_rr(rect(ix, iy, ix + TILE_ICON, iy + TILE_ICON), 8.0, with_a(th.highlight, (1.0 - io) * 1.5));
+    }
+    if let Some((bmp, _)) = &icon {
+        unsafe {
+            rt().DrawBitmap(bmp, Some(&rect(ix, iy, ix + TILE_ICON, iy + TILE_ICON)), io, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
+        };
+    }
+    draw_layout(&p.app.name, &s.fmt_tile, x + 5.0, y + 50.0, TILE_W - 10.0, 22.0, lerp_c(lerp_c(th.dim, th.text, 0.7), th.text, hl));
+    if layer {
+        unsafe { rt().PopLayer() };
+    }
+    set_transform(base);
+}
+
+fn draw_pins(base: &Matrix3x2, t_now: f64, dt: f32) {
+    let s = st();
+    s.pin_hits.clear();
+    let vis = visible_pins();
+    let n_vis = vis.len() as i32;
+    if n_vis == 0 {
+        return;
+    }
+    let rows_shown = pin_rows_shown();
+    s.pin_row_off = s.pin_row_off.clamp(0, (pin_rows_total() - rows_shown).max(0));
+    let mut dragged_k: i32 = -1;
+    for k in 0..n_vis {
+        let pi = vis[k as usize];
+        let row = k / PIN_COLS;
+        let shown = row >= s.pin_row_off && row < s.pin_row_off + rows_shown;
+        let dragged = s.dragging && pi as i32 == s.press_pin;
+        let slot = pin_slot(k, n_vis);
+        let (drag_pt, grab) = (s.drag_pt, s.grab);
+        let hot = (s.hover_pin == pi as i32 && !s.dragging && s.press_pin < 0) || (s.menu_open && s.menu_pin == pi as i32);
+        let pressed = s.press_pin == pi as i32 && !s.dragging;
+        let p = &mut s.pins[pi];
+        if !shown && !dragged {
+            p.placed = false;
+            continue;
+        }
+        let (tx, ty) = if dragged { (drag_pt.x - grab.x, drag_pt.y - grab.y) } else { (slot.x, slot.y) };
+        if !p.placed || dragged {
+            p.x = tx;
+            p.y = ty;
+            p.placed = true;
+        } else {
+            p.x = damp(p.x, tx, 20.0, dt);
+            p.y = damp(p.y, ty, 20.0, dt);
+        }
+        p.hover = damp(p.hover, if hot { 1.0 } else { 0.0 }, 18.0, dt);
+        p.press = damp(p.press, if pressed { 1.0 } else { 0.0 }, 30.0, dt);
+        let (hover, press) = (p.hover, p.press);
+        if dragged {
+            dragged_k = k;
+            continue;
+        }
+        s.pin_hits.push((rect(slot.x, slot.y, slot.x + TILE_W, slot.y + TILE_H), pi as i32));
+        let t = (t_now - s.show_time - 0.02 - k as f64 * 0.022) / 0.38;
+        let kin = ease_out_back(t.clamp(0.0, 1.0)) as f32;
+        let scale = (0.86 + 0.14 * kin) * (1.0 + 0.035 * hover) * (1.0 - 0.05 * press);
+        draw_tile(pi, clamp01(kin as f64 * 1.6), scale, 0.0, base, t_now);
+    }
+    if dragged_k >= 0 {
+        draw_tile(vis[dragged_k as usize], 1.0, 1.07, 1.0, base, t_now);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Right-click menu
+// ---------------------------------------------------------------------------
+fn draw_menu(base: &Matrix3x2, t_now: f64, dt: f32) {
+    let s = st();
+    if !s.menu_open || s.menu.is_empty() {
+        return;
+    }
+    let th = s.th;
+    let t = ease_out_cubic(clamp01((t_now - s.menu_time) / 0.14) as f64) as f32;
+    let (x, y, h) = (s.menu_pos.x, s.menu_pos.y, menu_h());
+    let r = rect(x, y, x + MENU_W, y + h);
+    set_transform(&m_mul(&m_scale(0.95 + 0.05 * t, 0.95 + 0.05 * t, x, y), base));
+    push_layer(t);
+    draw_shadow(r, th.shadow * 0.9, &s.tile_shadow);
+    let rr = rrect(r, 9.0);
+    fill_acrylic(&rr, &th, y, y + h);
+    set_color(with_a(th.tint_bottom, 0.55)); // a little more solid than the bar: it sits on top of it
+    unsafe { rt().FillRoundedRectangle(&rr, solid()) };
+    if let Some(b) = make_gradient(pt(0.0, y), pt(0.0, y + h), th.border_top, th.border_bottom) {
+        unsafe {
+            rt().DrawRoundedRectangle(&rrect(rect(x + 0.5, y + 0.5, x + MENU_W - 0.5, y + h - 0.5), 8.5), &b, 1.0, None::<&ID2D1StrokeStyle>)
+        };
+    }
+    if s.menu_sel >= 0 {
+        if !s.menu_hl_init {
+            s.menu_hl = s.menu_sel as f32;
+            s.menu_hl_init = true;
+        }
+        s.menu_hl = damp(s.menu_hl, s.menu_sel as f32, 30.0, dt);
+        let hy = y + MENU_PAD + s.menu_hl * MENU_ROW_H;
+        fill_rr(rect(x + 4.0, hy + 1.0, x + MENU_W - 4.0, hy + MENU_ROW_H - 1.0), 6.0, th.highlight);
+    }
+    for (i, &(_, glyph, text)) in s.menu.iter().enumerate() {
+        let ry = y + MENU_PAD + i as f32 * MENU_ROW_H;
+        let sel = i as i32 == s.menu_sel;
+        draw_layout(&ws(glyph), &s.fmt_glyph, x + 12.0, ry, 22.0, MENU_ROW_H, if sel { th.accent } else { lerp_c(th.dim, th.text, 0.5) });
+        draw_layout(&ws(text), &s.fmt_menu, x + 44.0, ry, MENU_W - 56.0, MENU_ROW_H, th.text);
+    }
+    unsafe { rt().PopLayer() };
+    set_transform(base);
+}
+
+// -2: outside the menu, -1: on its padding
+fn menu_item_at(x: f32, y: f32) -> i32 {
+    let s = st();
+    if !s.menu_open || x < s.menu_pos.x || x > s.menu_pos.x + MENU_W || y < s.menu_pos.y || y > s.menu_pos.y + menu_h() {
+        return -2;
+    }
+    let i = ((y - s.menu_pos.y - MENU_PAD) / MENU_ROW_H).floor() as i32;
+    if i >= 0 && (i as usize) < s.menu.len() {
+        i
+    } else {
+        -1
+    }
+}
+
 fn render() {
     let s = st();
     if s.px_w == 0 || !create_device_resources() {
@@ -2287,7 +2803,8 @@ fn render() {
     }
     s.hits.clear();
 
-    build_shadow();
+    build_shadow(&mut s.bar_shadow);
+    build_shadow(&mut s.tile_shadow);
     ensure_backdrop_brush();
 
     unsafe {
@@ -2318,12 +2835,15 @@ fn render() {
         let a = s.anim as f32;
         let sc = 0.94 + 0.06 * a;
         let ty = (1.0 - a) * 16.0;
-        let base = m_mul(&m_scale(sc, sc, MARGIN + BAR_W / 2.0, MARGIN + BAR_H / 2.0), &m_translate(0.0, ty));
+        // bar space -> window: the pin area sits above the bar
+        let base = m_mul(&m_scale(sc, sc, MARGIN + BAR_W / 2.0, MARGIN + BAR_H / 2.0), &m_translate(0.0, ty + PINS_MAX_H));
         set_transform(&base);
+
+        draw_pins(&base, t_now, dt);
 
         let bx = rect(MARGIN, MARGIN, MARGIN + BAR_W, MARGIN + BAR_H + s.panel_h);
         let rr = rrect(bx, RADIUS);
-        draw_shadow(bx, s.th.shadow);
+        draw_shadow(bx, s.th.shadow, &s.bar_shadow);
         let th = s.th;
         fill_acrylic(&rr, &th, MARGIN, MARGIN + BAR_H);
 
@@ -2338,6 +2858,7 @@ fn render() {
             draw_logo_at(MARGIN + LOGO_X, MARGIN + (BAR_H - LOGO_SIZE) / 2.0, LOGO_SIZE, &lb, &base, t_now, true);
         }
         draw_text_area(t_now, dt);
+        draw_menu(&base, t_now, dt);
 
         if fade_layer {
             set_transform(&m_identity());
@@ -2351,7 +2872,11 @@ fn render() {
         }
 
         let scale = s.dpi / 96.0;
-        let cur_h = s.px_h.min(((MARGIN * 2.0 + BAR_H + s.panel_h) * scale).ceil() as i32);
+        let mut content_bottom = MARGIN * 2.0 + BAR_H + s.panel_h;
+        if s.menu_open {
+            content_bottom = content_bottom.max(s.menu_pos.y + menu_h() + 24.0);
+        }
+        let cur_h = s.px_h.min(((PINS_MAX_H + content_bottom) * scale).ceil() as i32);
         publish_box();
         if s.hw {
             // The window follows the panel's height so the empty space below never catches clicks.
@@ -2402,8 +2927,34 @@ fn force_foreground(h: HWND) {
         } else {
             let _ = SetForegroundWindow(h);
         }
+        if GetForegroundWindow() != h {
+            // Windows refuses focus changes from background apps unless they just got input. A
+            // no-op key (VK 0xE8 is unassigned) counts as that input, then try again. Needed over
+            // games, which keep the keyboard otherwise.
+            let key = |up: bool| INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(0xE8),
+                        wScan: 0,
+                        dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                        time: 0,
+                        dwExtraInfo: INJECT_MAGIC,
+                    },
+                },
+            };
+            SendInput(&[key(false), key(true)], size_of::<INPUT>() as i32);
+            let _ = SetForegroundWindow(h);
+            let _ = BringWindowToTop(h);
+        }
         let _ = SetFocus(h);
     }
+}
+
+fn close_menu() {
+    let s = st();
+    s.menu_open = false;
+    s.menu_pin = -1;
 }
 
 fn show() {
@@ -2412,6 +2963,22 @@ fn show() {
         return;
     }
     if !s.visible {
+        let fg = unsafe { GetForegroundWindow() };
+        s.prev_fg = if !fg.is_invalid() && fg != hwnd() && (FULLSCREEN.load(Relaxed) || foreground_is_fullscreen()) {
+            fg
+        } else {
+            HWND::default()
+        };
+        close_menu();
+        s.press_pin = -1;
+        s.hover_pin = -1;
+        s.dragging = false;
+        s.pin_row_off = 0;
+        for p in s.pins.iter_mut() {
+            p.placed = false;
+            p.hover = 0.0;
+            p.press = 0.0;
+        }
         position_on_monitor();
         capture_backdrop();
         s.text.clear();
@@ -2460,12 +3027,32 @@ fn hide() {
             let _ = ReleaseCapture();
         }
     }
+    if s.dragging {
+        save_pins();
+    }
+    s.dragging = false;
+    s.press_pin = -1;
+    close_menu();
+}
+
+// Closing without launching anything (Esc, Win): hand the keyboard back to the game it was
+// opened over.
+fn dismiss() {
+    let s = st();
+    let back = s.prev_fg;
+    hide();
+    s.prev_fg = HWND::default();
+    unsafe {
+        if !back.is_invalid() && IsWindow(back).as_bool() {
+            let _ = SetForegroundWindow(back);
+        }
+    }
 }
 
 fn toggle() {
     let s = st();
     if s.visible && s.anim_to > 0.5 {
-        hide();
+        dismiss();
     } else {
         show();
     }
@@ -2525,8 +3112,19 @@ fn split_command(q: &str) -> (String, String) {
 fn launch(app: Option<&App>, q: &[u16], admin: bool) {
     let qs = String::from_utf16_lossy(q);
     let is_app = app.is_some();
+    let mut dir = String::new();
     let (file, params) = match app {
-        Some(a) => (format!("shell:AppsFolder\\{}", String::from_utf16_lossy(&a.target)), String::new()),
+        Some(a) => {
+            let t = String::from_utf16_lossy(&a.target);
+            if is_path_target(&a.target) && t.to_lowercase().ends_with(".exe") {
+                dir = games::parent_dir(&t); // games expect to start in their own folder
+            }
+            if is_path_target(&a.target) || is_url_target(&a.target) {
+                (t, String::new())
+            } else {
+                (format!("shell:AppsFolder\\{}", t), String::new())
+            }
+        }
         None => split_command(&qs),
     };
     let verb = if admin { "runas" } else { "open" };
@@ -2534,16 +3132,18 @@ fn launch(app: Option<&App>, q: &[u16], admin: bool) {
     unsafe {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
     }
+    st().prev_fg = HWND::default();
     hide();
     std::thread::spawn(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        let (fv, pv, vv) = (wz(&file), wz(&params), wz(verb));
+        let (fv, pv, vv, dv) = (wz(&file), wz(&params), wz(verb), wz(&dir));
         let mut sei = SHELLEXECUTEINFOW {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
             fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
             lpVerb: PCWSTR(vv.as_ptr()),
             lpFile: PCWSTR(fv.as_ptr()),
             lpParameters: if params.is_empty() { PCWSTR::null() } else { PCWSTR(pv.as_ptr()) },
+            lpDirectory: if dir.is_empty() { PCWSTR::null() } else { PCWSTR(dv.as_ptr()) },
             nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
@@ -2566,6 +3166,8 @@ fn launch(app: Option<&App>, q: &[u16], admin: bool) {
 fn run_command(cmd: usize) {
     let s = st();
     match cmd {
+        CMD_GAMES => set_text(&ws("> games ")),
+        CMD_PINS => set_text(&ws("> pins")),
         CMD_THEME => set_text(&ws("> theme")),
         CMD_EXPANDED => {
             s.expanded = !s.expanded;
@@ -2601,6 +3203,26 @@ fn activate(force_raw: bool, admin: bool) {
             }
             launch(None, &q, admin);
         }
+        Mode::Games => {
+            if s.sel >= 0 && (s.sel as usize) < s.results.len() {
+                let a = s.results[s.sel as usize].clone();
+                launch(Some(&a), &[], admin);
+            }
+        }
+        Mode::Pins => {
+            if s.sel >= 0 && (s.sel as usize) < s.results.len() {
+                let i = find_pin(&s.results[s.sel as usize].target);
+                if i >= 0 {
+                    let p = &mut s.pins[i as usize];
+                    p.hidden = !p.hidden;
+                    p.placed = false;
+                    save_pins();
+                    let sel = s.sel;
+                    update_state();
+                    s.sel = sel.min(s.results.len() as i32 - 1);
+                }
+            }
+        }
         Mode::None => {
             if q.is_empty() {
                 return;
@@ -2626,6 +3248,159 @@ fn select(idx: i32) {
         set_preview(idx as usize);
     }
     recompute_ghost();
+}
+
+// ---------------------------------------------------------------------------
+// Right-click menu actions
+// ---------------------------------------------------------------------------
+// The file behind an app: the exe of a desktop app, the shortcut / exe of a game.
+fn app_file_path(a: &App) -> String {
+    if is_path_target(&a.target) {
+        return String::from_utf16_lossy(&a.target);
+    }
+    if is_path_target(&a.icon) {
+        return String::from_utf16_lossy(&a.icon);
+    }
+    if is_url_target(&a.target) || is_packaged_target(&a.target) {
+        return String::new();
+    }
+    let path = HSTRING::from(format!("shell:AppsFolder\\{}", String::from_utf16_lossy(&a.target)));
+    let mut r = String::new();
+    unsafe {
+        // PKEY_Link_TargetParsingPath
+        let key = windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY {
+            fmtid: windows::core::GUID::from_u128(0xB9B4B3FC_2B51_4A42_B5D8_324146AFCF25),
+            pid: 2,
+        };
+        if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem2>(&path, None::<&IBindCtx>) {
+            if let Ok(p) = item.GetString(&key) {
+                r = games::expand_env(&String::from_utf16_lossy(p.as_wide()));
+                CoTaskMemFree(Some(p.0 as *const c_void));
+            }
+        }
+        if r.is_empty() && a.target.contains(&(b'\\' as u16)) {
+            // "{known folder GUID}\rest\of\path.exe"
+            let mut pidl: *mut windows::Win32::UI::Shell::Common::ITEMIDLIST = null_mut();
+            if SHParseDisplayName(&path, None::<&IBindCtx>, &mut pidl, 0, None).is_ok() && !pidl.is_null() {
+                if let Ok(p) = SHGetNameFromIDList(pidl, SIGDN_FILESYSPATH) {
+                    r = String::from_utf16_lossy(p.as_wide());
+                    CoTaskMemFree(Some(p.0 as *const c_void));
+                }
+                CoTaskMemFree(Some(pidl as *const c_void));
+            }
+        }
+    }
+    if games::file_exists(&r) {
+        r
+    } else {
+        String::new()
+    }
+}
+
+fn show_in_explorer(file: String) {
+    if file.is_empty() {
+        return;
+    }
+    st().prev_fg = HWND::default();
+    hide();
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let mut pidl: *mut windows::Win32::UI::Shell::Common::ITEMIDLIST = null_mut();
+        if SHParseDisplayName(&HSTRING::from(file), None::<&IBindCtx>, &mut pidl, 0, None).is_ok() && !pidl.is_null() {
+            let _ = SHOpenFolderAndSelectItems(pidl, None, 0);
+            CoTaskMemFree(Some(pidl as *const c_void));
+        }
+        CoUninitialize();
+    });
+}
+
+fn open_menu(app: &App, pin: i32, mut at: D2D_POINT_2F) {
+    let s = st();
+    s.menu.clear();
+    let file = app_file_path(app);
+    let runnable = !is_url_target(&app.target) && !is_packaged_target(&app.target);
+    if runnable {
+        s.menu.push((MA_ADMIN, "\u{E7EF}", "Run as administrator"));
+    }
+    if !file.is_empty() {
+        s.menu.push((MA_LOCATION, "\u{E838}", "Open file location"));
+    }
+    if find_pin(&app.target) >= 0 {
+        s.menu.push((MA_UNPIN_START, "\u{E77A}", "Unpin from Start"));
+    } else {
+        s.menu.push((MA_PIN_START, "\u{E718}", "Pin to Start"));
+    }
+    if !file.is_empty() {
+        s.menu.push((MA_PIN_TASKBAR, "\u{E718}", "Pin to taskbar"));
+    }
+    if pin >= 0 {
+        s.menu.push((MA_HIDE, "\u{ED1A}", "Hide"));
+    }
+    s.menu_app = app.clone();
+    s.menu_pin = pin;
+    // keep it inside the window (bar space: x 0..WIN_W, y -PINS_MAX_H..WIN_MAX_H-PINS_MAX_H)
+    let h = menu_h();
+    at.x = at.x.clamp(6.0, WIN_W - MENU_W - 6.0);
+    let bottom = WIN_MAX_H - PINS_MAX_H - 6.0;
+    if at.y + h > bottom {
+        at.y = (-PINS_MAX_H + 6.0).max(at.y - h);
+    }
+    s.menu_pos = at;
+    s.menu_time = now();
+    s.menu_sel = -1;
+    s.menu_hl_init = false;
+    s.menu_open = true;
+    publish_box();
+}
+
+fn run_menu_action(i: i32) {
+    let s = st();
+    if i < 0 || i as usize >= s.menu.len() {
+        return;
+    }
+    let action = s.menu[i as usize].0;
+    let app = s.menu_app.clone();
+    let pin = s.menu_pin;
+    close_menu();
+    match action {
+        MA_ADMIN => launch(Some(&app), &[], true),
+        MA_LOCATION => show_in_explorer(app_file_path(&app)),
+        // Windows 11 only lets people pin to the taskbar themselves (from Explorer's menu or a
+        // running app's taskbar button): show the file so it's one right-click away.
+        MA_PIN_TASKBAR => show_in_explorer(app_file_path(&app)),
+        MA_PIN_START => {
+            let mut a = app.clone();
+            a.alias.clear();
+            a.detail.clear();
+            s.pins.push(Pin { app: a, ..Default::default() });
+            save_pins();
+        }
+        MA_UNPIN_START => {
+            let k = find_pin(&app.target);
+            if k >= 0 {
+                s.pins.remove(k as usize);
+            }
+            save_pins();
+        }
+        MA_HIDE => {
+            if pin >= 0 && (pin as usize) < s.pins.len() {
+                s.pins[pin as usize].hidden = true;
+                save_pins();
+            }
+        }
+        _ => {}
+    }
+    if action == MA_PIN_START || action == MA_UNPIN_START || action == MA_HIDE {
+        for p in s.pins.iter_mut() {
+            p.placed = p.placed && !p.hidden;
+        }
+        if s.mode == Mode::Pins || s.mode == Mode::Commands {
+            let sel = s.sel;
+            update_state();
+            s.sel = sel.clamp(0, (item_count() - 1).max(0));
+        }
+        publish_box();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2801,11 +3576,51 @@ fn on_key(vk: u16) {
     let shift = key_down(VK_SHIFT.0 as i32);
     let n = s.text.len();
     let grid = s.mode == Mode::Themes;
-    let list = s.mode == Mode::Results || s.mode == Mode::Commands;
+    let list = is_app_list(s.mode) || s.mode == Mode::Commands;
     let sel = s.sel;
     let gc = GRID_COLS as i32;
+    if s.menu_open {
+        // the menu has the keyboard while it's open
+        let n2 = s.menu.len() as i32;
+        match VIRTUAL_KEY(vk) {
+            VK_ESCAPE => close_menu(),
+            VK_UP => s.menu_sel = if s.menu_sel <= 0 { n2 - 1 } else { s.menu_sel - 1 },
+            VK_DOWN => s.menu_sel = (s.menu_sel + 1) % n2,
+            VK_RETURN if s.menu_sel >= 0 => run_menu_action(s.menu_sel),
+            _ => {}
+        }
+        return;
+    }
+    if s.dragging && VIRTUAL_KEY(vk) == VK_ESCAPE {
+        s.dragging = false;
+        s.press_pin = -1;
+        unsafe {
+            if GetCapture() == hwnd() {
+                let _ = ReleaseCapture();
+            }
+        }
+        save_pins();
+        return;
+    }
     match VIRTUAL_KEY(vk) {
-        VK_ESCAPE => hide(),
+        VK_ESCAPE => dismiss(),
+        VK_APPS => {
+            // the keyboard's menu key opens the right-click menu for the selection
+            if is_app_list(s.mode) && sel >= 0 && (sel as usize) < s.results.len() {
+                let a = s.results[sel as usize].clone();
+                open_menu(&a, -1, pt(MARGIN + 60.0, s.sel_y + ROW_H));
+            }
+        }
+        VK_PRIOR => {
+            if list {
+                select(sel - MAX_ROWS as i32);
+            }
+        }
+        VK_NEXT => {
+            if list {
+                select(sel + MAX_ROWS as i32);
+            }
+        }
         VK_RETURN => activate(shift && !ctrl, ctrl && shift),
         VK_TAB => {
             if s.mode == Mode::Commands && s.ghost.is_empty() && (sel as usize) < s.cmd_list.len() {
@@ -2912,6 +3727,15 @@ fn hit_text_index(x_dip: f32) -> usize {
     }
     let pos = m.textPosition as usize + if trailing.as_bool() { m.length as usize } else { 0 };
     pos.min(s.text.len())
+}
+
+fn pin_at(x: f32, y: f32) -> i32 {
+    for (r, idx) in &st().pin_hits {
+        if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
+            return *idx;
+        }
+    }
+    -1
 }
 
 fn hit_item_at(x: f32, y: f32) -> i32 {
@@ -3117,6 +3941,28 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 update_state();
             }
         }
+        WM_APP_GAMES => {
+            let s = st();
+            if s.mode == Mode::Games {
+                let sel = s.sel;
+                update_state();
+                s.sel = sel.clamp(0, (item_count() - 1).max(0));
+            }
+        }
+        WM_APP_PINS => {
+            let s = st();
+            let imported = IMPORTED_PINS.lock().unwrap().take().unwrap_or_default();
+            if s.pins.is_empty() {
+                for a in imported {
+                    if find_pin(&a.target) >= 0 {
+                        continue;
+                    }
+                    s.pins.push(Pin { app: a, ..Default::default() });
+                }
+            }
+            save_pins(); // saved even when empty, so Windows' list is only copied once
+            publish_box();
+        }
         WM_APP_TRAY => match (lp.0 & 0xFFFF) as u32 {
             WM_LBUTTONUP => {
                 // A tray click first deactivates the open bar; don't immediately re-open it.
@@ -3136,10 +3982,30 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_CHAR => on_char(wp.0 as u16),
         WM_KEYDOWN => on_key(wp.0 as u16),
         WM_LBUTTONDOWN => {
+            // window pixels -> bar space
             let s = st();
             let k = 96.0 / s.dpi;
             let (px, py) = lparam_xy(lp);
-            let (x, y) = (px as f32 * k, py as f32 * k);
+            let (x, y) = (px as f32 * k, py as f32 * k - PINS_MAX_H);
+            if s.menu_open {
+                let mi = menu_item_at(x, y);
+                if mi >= 0 {
+                    run_menu_action(mi);
+                } else if mi == -2 {
+                    close_menu();
+                }
+                return LRESULT(0);
+            }
+            let pin = pin_at(x, y);
+            if pin >= 0 {
+                s.press_pin = pin;
+                s.press_pt = pt(x, y);
+                s.drag_pt = pt(x, y);
+                s.grab = pt(x - s.pins[pin as usize].x, y - s.pins[pin as usize].y);
+                s.dragging = false;
+                SetCapture(h);
+                return LRESULT(0);
+            }
             if x < MARGIN || x > MARGIN + BAR_W || y < MARGIN || y > MARGIN + BAR_H + s.panel_h {
                 hide();
                 return LRESULT(0);
@@ -3156,26 +4022,154 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             SetCapture(h);
             move_caret(hit_text_index(x), key_down(VK_SHIFT.0 as i32));
         }
-        WM_MOUSEMOVE => {
+        WM_RBUTTONDOWN => {}
+        WM_RBUTTONUP => {
             let s = st();
-            let (x, y) = lparam_xy(lp);
-            if x == s.last_mouse.x && y == s.last_mouse.y {
+            let k = 96.0 / s.dpi;
+            let (px, py) = lparam_xy(lp);
+            let (x, y) = (px as f32 * k, py as f32 * k - PINS_MAX_H);
+            if s.dragging || (s.menu_open && menu_item_at(x, y) != -2) {
                 return LRESULT(0);
             }
-            s.last_mouse = POINT { x, y };
-            let k = 96.0 / s.dpi;
-            if (wp.0 & 0x0001) != 0 && GetCapture() == h {
-                move_caret(hit_text_index(x as f32 * k), true);
-            } else {
-                let idx = hit_item_at(x as f32 * k, y as f32 * k);
-                if idx >= 0 {
+            close_menu();
+            let pin = pin_at(x, y);
+            if pin >= 0 {
+                let a = s.pins[pin as usize].app.clone();
+                open_menu(&a, pin, pt(x, y));
+                return LRESULT(0);
+            }
+            if is_app_list(s.mode) && y > MARGIN + BAR_H {
+                let idx = hit_item_at(x, y);
+                if idx >= 0 && (idx as usize) < s.results.len() {
                     select(idx);
+                    s.sel = idx;
+                    let a = s.results[idx as usize].clone();
+                    open_menu(&a, -1, pt(x, y));
                 }
             }
+        }
+        WM_MOUSEWHEEL => {
+            let s = st();
+            let mut p = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+            let _ = ScreenToClient(h, &mut p);
+            let y = p.y as f32 * 96.0 / s.dpi - PINS_MAX_H;
+            let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
+            let mut steps = -delta / WHEEL_DELTA as i32;
+            if steps == 0 {
+                steps = if delta > 0 { -1 } else { 1 };
+            }
+            close_menu();
+            if y < MARGIN {
+                // over the pins: page through rows
+                s.pin_row_off = (s.pin_row_off + if steps > 0 { 1 } else { -1 }).clamp(0, (pin_rows_total() - pin_rows_shown()).max(0));
+                for pp in s.pins.iter_mut() {
+                    pp.placed = false;
+                }
+            } else if is_app_list(s.mode) || s.mode == Mode::Commands {
+                let n = item_count();
+                let mr = MAX_ROWS as i32;
+                s.list_top = (s.list_top + steps * 3).clamp(0, (n - mr).max(0));
+                s.sel = s.sel.clamp(s.list_top, (n - 1).min(s.list_top + mr - 1));
+                recompute_ghost();
+            }
+        }
+        WM_MOUSEMOVE => {
+            let s = st();
+            let (mx, my) = lparam_xy(lp);
+            if mx == s.last_mouse.x && my == s.last_mouse.y {
+                return LRESULT(0);
+            }
+            s.last_mouse = POINT { x: mx, y: my };
+            let k = 96.0 / s.dpi;
+            let (x, y) = (mx as f32 * k, my as f32 * k - PINS_MAX_H);
+            if s.press_pin >= 0 && GetCapture() == h {
+                s.drag_pt = pt(x, y);
+                if !s.dragging && (x - s.press_pt.x).hypot(y - s.press_pt.y) > 6.0 {
+                    s.dragging = true;
+                }
+                if s.dragging {
+                    // move the dragged pin to the slot nearest to where its tile is now
+                    let vis = visible_pins();
+                    let n_vis = vis.len() as i32;
+                    let (mut from, mut best, mut best_d) = (-1i32, -1i32, 1e9f32);
+                    let cx = x - s.grab.x + TILE_W / 2.0;
+                    let cy = y - s.grab.y + TILE_H / 2.0;
+                    for kk in 0..n_vis {
+                        if vis[kk as usize] as i32 == s.press_pin {
+                            from = kk;
+                        }
+                        let row = kk / PIN_COLS;
+                        if row < s.pin_row_off || row >= s.pin_row_off + pin_rows_shown() {
+                            continue;
+                        }
+                        let sl = pin_slot(kk, n_vis);
+                        let d = (sl.x + TILE_W / 2.0 - cx).hypot(sl.y + TILE_H / 2.0 - cy);
+                        if d < best_d {
+                            best_d = d;
+                            best = kk;
+                        }
+                    }
+                    if from >= 0 && best >= 0 && best != from {
+                        let a = vis[from as usize];
+                        let mut b = vis[best as usize];
+                        let moving = s.pins.remove(a);
+                        if b > a {
+                            b -= 1;
+                        }
+                        let at = if best > from { b + 1 } else { b };
+                        let target = moving.app.target.clone();
+                        s.pins.insert(at, moving);
+                        s.press_pin = find_pin(&target);
+                    }
+                }
+                return LRESULT(0);
+            }
+            if (wp.0 & 0x0001) != 0 && GetCapture() == h {
+                move_caret(hit_text_index(x), true);
+                return LRESULT(0);
+            }
+            if s.menu_open {
+                let mi = menu_item_at(x, y);
+                if mi >= 0 {
+                    s.menu_sel = mi;
+                }
+                return LRESULT(0);
+            }
+            s.hover_pin = pin_at(x, y);
+            let idx = hit_item_at(x, y);
+            if idx >= 0 {
+                select(idx);
+            }
+            if !s.tracking_leave {
+                let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
+                s.tracking_leave = TrackMouseEvent(&mut tme).is_ok();
+            }
+        }
+        WM_MOUSELEAVE => {
+            let s = st();
+            s.tracking_leave = false;
+            s.hover_pin = -1;
         }
         WM_LBUTTONUP => {
             if GetCapture() == h {
                 let _ = ReleaseCapture();
+            }
+            let s = st();
+            if s.press_pin >= 0 {
+                let pin = s.press_pin;
+                let dragged = s.dragging;
+                s.press_pin = -1;
+                s.dragging = false;
+                if dragged {
+                    save_pins();
+                } else {
+                    let k = 96.0 / s.dpi;
+                    let (px, py) = lparam_xy(lp);
+                    if pin_at(px as f32 * k, py as f32 * k - PINS_MAX_H) == pin {
+                        let a = s.pins[pin as usize].app.clone();
+                        launch(Some(&a), &[], false);
+                    }
+                }
             }
         }
         WM_SETCURSOR => {
@@ -3183,8 +4177,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = GetCursorPos(&mut p);
             let _ = ScreenToClient(h, &mut p);
             let k = 96.0 / st().dpi;
-            let (x, y) = (p.x as f32 * k, p.y as f32 * k);
-            let text = x >= MARGIN + TEXT_X - 4.0 && x <= MARGIN + BAR_W && y >= MARGIN && y <= MARGIN + BAR_H;
+            let (x, y) = (p.x as f32 * k, p.y as f32 * k - PINS_MAX_H);
+            let text = !st().menu_open && x >= MARGIN + TEXT_X - 4.0 && x <= MARGIN + BAR_W && y >= MARGIN && y <= MARGIN + BAR_H;
             if let Ok(cur) = LoadCursorW(HINSTANCE::default(), if text { IDC_IBEAM } else { IDC_ARROW }) {
                 SetCursor(cur);
             }
@@ -3233,7 +4227,13 @@ fn main() {
             }
         };
 
-        let fam = if font_exists(&dw, "Segoe UI Variable Text") { "Segoe UI Variable Text" } else { "Segoe UI" };
+        CUSTOM_FONT = load_custom_font(&dw);
+        let custom_fam = CUSTOM_FONT.as_ref().map(|(_, n)| n.clone());
+        let fam: &str = match &custom_fam {
+            Some(n) => n.as_str(),
+            None if font_exists(&dw, "Segoe UI Variable Text") => "Segoe UI Variable Text",
+            None => "Segoe UI",
+        };
         let icons = if font_exists(&dw, "Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
         let fmt_text = make_format(&dw, fam, FONT_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false);
         let lang = read_string(SETTINGS_KEY, w!("Language")).unwrap_or_default();
@@ -3255,6 +4255,8 @@ fn main() {
             fmt_glyph: make_format(&dw, icons, 16.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false),
             fmt_header: make_format(&dw, fam, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false),
             fmt_card: make_format(&dw, fam, 12.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
+            fmt_tile: make_format(&dw, fam, 11.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
+            fmt_menu: make_format(&dw, fam, 13.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
             fmt_text,
             placeholder_layout,
             d2d,
@@ -3273,11 +4275,8 @@ fn main() {
             win_h: -1,
             solid: None,
             logo_brush: None,
-            shadow_bmp: None,
-            shadow_dpi: 0.0,
-            shadow_c: 0,
-            shadow_n: 0,
-            shadow_pad: 0,
+            bar_shadow: Shadow::new(SHADOW_SIGMA, RADIUS, SHADOW_OFFSET_Y),
+            tile_shadow: Shadow::new(7.0, 12.0, 3.0),
             bd_px: Vec::new(),
             bd_w: 0,
             bd_h: 0,
@@ -3337,7 +4336,32 @@ fn main() {
             hint_name: Vec::new(),
             hint_time: 0.0,
             icon_px: 32,
+            tile_px: 32,
             icon_bmps: HashMap::new(),
+            pins: Vec::new(),
+            pin_row_off: 0,
+            press_pin: -1,
+            dragging: false,
+            press_pt: pt(0.0, 0.0),
+            drag_pt: pt(0.0, 0.0),
+            grab: pt(0.0, 0.0),
+            hover_pin: -1,
+            pin_hits: Vec::new(),
+            tracking_leave: false,
+            games_at: -1e9,
+            list_off: 0.0,
+            sel_row: 0.0,
+            list_top: 0,
+            menu: Vec::new(),
+            menu_open: false,
+            menu_app: App::default(),
+            menu_pin: -1,
+            menu_pos: pt(0.0, 0.0),
+            menu_time: 0.0,
+            menu_sel: -1,
+            menu_hl: 0.0,
+            menu_hl_init: false,
+            prev_fg: HWND::default(),
         });
         ST = Box::into_raw(state);
         *ICONS.lock().unwrap() = Some(IconCache { queue: VecDeque::new(), map: HashMap::new(), quit: false });
@@ -3391,6 +4415,9 @@ fn main() {
         let uia_thread = std::thread::spawn(start_button_thread);
         let icon_thread = std::thread::spawn(icon_worker);
         refresh_apps(true);
+        if !load_pins() {
+            start_import(); // first run: start from the Windows Start menu's pins
+        }
 
         // Message loop: block while hidden; while visible, pump messages and present one
         // frame per display refresh (DwmFlush waits for the next composition pass).

@@ -25,7 +25,7 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <d2d1.h>
-#include <dwrite.h>
+#include <dwrite_3.h>
 #include <winhttp.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -584,8 +584,76 @@ static double EaseInOutSine(double t) { return -(std::cos(3.14159265 * t) - 1) /
 static float Damp(float c, float t, float k, float dt) { return c + (t - c) * (1 - std::exp(-k * dt)); }
 static D2D1_COLOR_F Col(UINT32 rgb, float a = 1) { return ColorF(rgb, a); }
 
+// A font in "<install folder>\Fonts" (any .otf / .ttf) is used for all text, like in the app.
+static IDWriteFontCollection* g_fontColl;
+static std::wstring g_fontFamily;
+static void LoadCustomFont() {
+    std::wstring dir = InstallDir() + L"\\Fonts";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    std::vector<std::wstring> files;
+    do {
+        std::wstring n = fd.cFileName;
+        for (auto& c : n) c = (wchar_t)towlower(c);
+        if (n.size() > 4 && (n.compare(n.size() - 4, 4, L".otf") == 0 || n.compare(n.size() - 4, 4, L".ttf") == 0))
+            files.push_back(dir + L"\\" + fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (files.empty()) return;
+    std::sort(files.begin(), files.end());
+    IDWriteFactory5* f5 = nullptr;
+    IDWriteFontSetBuilder1* b = nullptr;
+    IDWriteFontSet* set = nullptr;
+    IDWriteFontCollection1* coll = nullptr;
+    if (SUCCEEDED(g_dw->QueryInterface(IID_PPV_ARGS(&f5))) && SUCCEEDED(f5->CreateFontSetBuilder(&b))) {
+        for (auto& p : files) {
+            IDWriteFontFile* file = nullptr;
+            if (SUCCEEDED(f5->CreateFontFileReference(p.c_str(), nullptr, &file))) {
+                b->AddFontFile(file);
+                file->Release();
+            }
+        }
+        if (SUCCEEDED(b->CreateFontSet(&set)) && SUCCEEDED(f5->CreateFontCollectionFromFontSet(set, &coll)) &&
+            coll->GetFontFamilyCount() > 0) {
+            IDWriteFontFamily* fam = nullptr;
+            IDWriteLocalizedStrings* names = nullptr;
+            if (SUCCEEDED(coll->GetFontFamily(0, &fam)) && SUCCEEDED(fam->GetFamilyNames(&names))) {
+                UINT32 idx = 0, len = 0;
+                BOOL exists = FALSE;
+                names->FindLocaleName(L"en-us", &idx, &exists);
+                if (!exists) idx = 0;
+                names->GetStringLength(idx, &len);
+                std::wstring n(len + 1, L'\0');
+                names->GetString(idx, &n[0], len + 1);
+                n.resize(len);
+                if (!n.empty()) {
+                    g_fontFamily = n;
+                    g_fontColl = coll;
+                    coll = nullptr;
+                }
+            }
+            if (names) names->Release();
+            if (fam) fam->Release();
+        }
+    }
+    if (coll) coll->Release();
+    if (set) set->Release();
+    if (b) b->Release();
+    if (f5) f5->Release();
+}
+
 static IDWriteTextFormat* MakeFormat(float size, DWRITE_FONT_WEIGHT w, const wchar_t* fam = nullptr) {
     static const wchar_t* ui = nullptr;
+    if (!fam && g_fontColl) {
+        IDWriteTextFormat* f = nullptr;
+        g_dw->CreateTextFormat(g_fontFamily.c_str(), g_fontColl, w, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                               size, L"", &f);
+        if (f) {
+            f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            return f;
+        }
+    }
     if (!ui) {
         IDWriteFontCollection* c = nullptr;
         BOOL ex = FALSE;
@@ -1524,6 +1592,18 @@ static void UninstallWorker() {
     std::wstring dir = InstallDir();
     DeleteFileW(AppExe().c_str());
     DeleteFileW((InstallerExe() + L".old").c_str());
+    {  // fonts added for Custom Start
+        std::wstring fonts = dir + L"\\Fonts";
+        WIN32_FIND_DATAW fd;
+        HANDLE fh = FindFirstFileW((fonts + L"\\*").c_str(), &fd);
+        if (fh != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileW((fonts + L"\\" + fd.cFileName).c_str());
+            } while (FindNextFileW(fh, &fd));
+            FindClose(fh);
+        }
+        RemoveDirectoryW(fonts.c_str());
+    }
     std::wstring programs = KnownFolder(FOLDERID_Programs);
     DeleteFileW((programs + L"\\Custom Start.lnk").c_str());
     DeleteFileW((programs + L"\\Custom Start Setup.lnk").c_str());
@@ -1797,6 +1877,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d);
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&g_dw));
     if (!g_d2d || !g_dw) return 1;
+    LoadCustomFont();
     g_fTitle = MakeFormat(28, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     g_fSub = MakeFormat(15, DWRITE_FONT_WEIGHT_NORMAL);
     g_fBody = MakeFormat(14, DWRITE_FONT_WEIGHT_NORMAL);
@@ -1887,6 +1968,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     SafeRelease(g_rt);
     for (auto* f : {g_fTitle, g_fSub, g_fBody, g_fBtn, g_fSmall, g_fGlyph, g_fBig, g_fMono, g_fIcon, g_fCardTitle})
         if (f) f->Release();
+    SafeRelease(g_fontColl);
     SafeRelease(g_dw);
     SafeRelease(g_d2d);
     CoUninitialize();
