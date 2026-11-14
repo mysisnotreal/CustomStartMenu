@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "assets": {
+    "cpp": "CSM-cpp.exe",
+    "rust": "CSM-rust.exe",
+    "installer": "CSMInstaller.exe"
+  },
+  "releases": [
+    {
+      "version": "1.0.0",
+      "added": [
+        "Command bar that replaces the Windows Start menu (Windows key, Ctrl+Esc or the Start button)",
+        "Smooth open and close animation with an animated, gliding caret",
+        "Frosted backdrop that fades out at the edges",
+        "Themes: Dark, Light, Translucent, Glass, Midnight, Sunset, Mint and OLED (type > theme)",
+        "Expanded results: matching apps listed under the bar while you type",
+        "Choice of C++ or Rust backend",
+        "CSMInstaller with automatic updates from GitHub"
+      ],
+      "removed": []
+    }
+  ]
+}
