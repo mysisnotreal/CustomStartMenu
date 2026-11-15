@@ -108,10 +108,10 @@ pub fn pin_slot(k: i32, n_vis: i32) -> D2D_POINT_2F {
     let rows_shown = pin_rows_shown();
     let (row, col) = (k / PIN_COLS, k % PIN_COLS);
     let in_row = PIN_COLS.min(n_vis - row * PIN_COLS);
-    let row_w = in_row as f32 * TILE_W + (in_row - 1) as f32 * TILE_GAP;
+    let row_w = in_row as f32 * tile_w() + (in_row - 1) as f32 * TILE_GAP;
     let top = MARGIN - PINS_GAP - rows_shown as f32 * TILE_H - (rows_shown - 1) as f32 * TILE_GAP;
     pt(
-        MARGIN + (BAR_W - row_w) / 2.0 + col as f32 * (TILE_W + TILE_GAP),
+        MARGIN + (bar_w() - row_w) / 2.0 + col as f32 * (tile_w() + TILE_GAP),
         top + (row - st().pin_row_off) as f32 * (TILE_H + TILE_GAP),
     )
 }

@@ -243,7 +243,7 @@ pub fn scroll_to(off: f32, instant: bool) {
 // ---- downloads -------------------------------------------------------------------
 // GET over HTTPS. With a path, the body goes to that file (via a temporary file, so a
 // broken download never leaves half a font behind); otherwise into `out`.
-fn http_get(url: &str, mut out: Option<&mut Vec<u8>>, path: Option<&str>, progress: &mut dyn FnMut(f32)) -> bool {
+pub fn http_get(url: &str, mut out: Option<&mut Vec<u8>>, path: Option<&str>, progress: &mut dyn FnMut(f32)) -> bool {
     let Some(rest) = url.strip_prefix("https://") else { return false };
     let (host, p) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let mut ok = false;
@@ -583,20 +583,20 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
     draw_layout(&ws(&title), &s.fmt_header, MARGIN + GRID_PAD + 2.0, top + GRID_PAD - 4.0, 200.0, GRID_HEADER_H, with_a(th.dim, alpha));
     if !cur.is_empty() {
         let w = 128.0;
-        let x = MARGIN + BAR_W - GRID_PAD - w;
+        let x = MARGIN + bar_w() - GRID_PAD - w;
         let y = top + GRID_PAD - 1.0;
         let r = rect(x, y, x + w, y + GRID_HEADER_H - 6.0);
         fill_rr(r, 11.0, with_a(th.text, alpha * if f.default_hot { 0.14 } else { 0.08 }));
         draw_layout(&ws("Use default font"), &s.fmt_card, x, y, w, GRID_HEADER_H - 6.0, with_a(th.text, alpha * 0.9));
         f.default_hit = Some(r);
     } else {
-        draw_layout(&ws("↵ download / use"), &s.fmt_row_right, MARGIN + BAR_W - GRID_PAD - 260.0, top + GRID_PAD - 4.0, 258.0, GRID_HEADER_H, with_a(th.dim, alpha * 0.85));
+        draw_layout(&ws("↵ download / use"), &s.fmt_row_right, MARGIN + bar_w() - GRID_PAD - 260.0, top + GRID_PAD - 4.0, 258.0, GRID_HEADER_H, with_a(th.dim, alpha * 0.85));
     }
 
     let c_top = top + grid::TOP_H;
     let c_bottom = top + s.panel_h;
     f.grid.animate(dt);
-    unsafe { rt().PushAxisAlignedClip(&rect(MARGIN, c_top, MARGIN + BAR_W, c_bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    unsafe { rt().PushAxisAlignedClip(&rect(MARGIN, c_top, MARGIN + bar_w(), c_bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
 
     if f.list.is_empty() {
         draw_layout(&ws("No fonts match"), &s.fmt_row, MARGIN + GRID_PAD + 2.0, c_top, 300.0, 40.0, with_a(th.dim, alpha));

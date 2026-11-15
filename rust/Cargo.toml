@@ -1,6 +1,6 @@
 [package]
 name = "csm"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "Custom Start (CSM), Rust backend: a tray app that replaces the Windows Start menu with a command bar"
 license = "MIT"
@@ -14,6 +14,27 @@ path = "src/main.rs"
 version = "=0.58.0"
 features = [
     "Foundation_Numerics",
+    "Foundation",
+    "Foundation_Collections",
+    "Media_Control",
+    "Storage_Streams",
+    "Devices_Radios",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_Multimedia",
+    "Win32_System_Power",
+    "Win32_System_Shutdown",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Time",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Wmi",
+    "Win32_System_Rpc",
+    "Win32_Globalization",
+    "Win32_System_Com_StructuredStorage",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",

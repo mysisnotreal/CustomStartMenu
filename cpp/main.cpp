@@ -15,6 +15,8 @@
 #endif
 #define NOMINMAX
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -30,6 +32,18 @@
 #include <dwrite_3.h>
 #include <UIAutomation.h>
 #include <propsys.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#include <powrprof.h>
+#include <mmsystem.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <endpointvolume.h>
+#include <wbemidl.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#include <iphlpapi.h>
+#include "winrt_bridge.h"
 
 #include <algorithm>
 #include <atomic>
@@ -37,6 +51,7 @@
 #include <condition_variable>
 #include <cwctype>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -58,6 +73,11 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dcomp.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "powrprof.lib")
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "pdh.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 using D2D1::ColorF;
 using D2D1::Matrix3x2F;
@@ -66,11 +86,11 @@ using D2D1::Matrix3x2F;
 // Layout (device independent pixels)
 // ---------------------------------------------------------------------------
 namespace Lay {
-constexpr float BarW = 620.f;
+inline float BarW = 620.f;  // "> layout" width
 constexpr float BarH = 56.f;
 constexpr float Margin = 52.f;  // room around the container for the shadow / animation
-constexpr float Radius = 14.f;
-constexpr float VerticalPos = 0.40f;  // bar center, as a fraction of work-area height
+inline float Radius = 14.f;  // "> layout" corners
+inline float VerticalPos = 0.40f;  // bar center, as a fraction of work-area height
 constexpr float LogoX = 20.f;
 constexpr float LogoSize = 18.f;
 constexpr float TextX = 54.f;
@@ -99,7 +119,7 @@ constexpr float MaxPanelH = PanelPad * 2 + RowH * MaxRows;
 constexpr int PinCols = 7;
 constexpr int PinMaxRows = 3;
 constexpr float TileGap = 10.f;
-constexpr float TileW = (BarW - (PinCols - 1) * TileGap) / PinCols;
+inline float TileW = (BarW - (PinCols - 1) * TileGap) / PinCols;
 constexpr float TileH = 80.f;
 constexpr float TileRadius = 12.f;
 constexpr float TileIcon = 32.f;
@@ -114,7 +134,7 @@ constexpr float MenuPad = 5.f;
 // The window always has room for the tallest pin area above the bar, so the bar (and the
 // blurred backdrop behind it) never moves when pins are added or hidden. Drawing happens in
 // "bar space", where the bar's top-left corner is (Margin, Margin) and the pins sit at y < Margin.
-constexpr float WinW = BarW + 2 * Margin;
+inline float WinW = BarW + 2 * Margin;
 constexpr float WinMaxH = PinsMaxH + BarH + MaxPanelH + 2 * Margin;
 }  // namespace Lay
 
@@ -132,7 +152,7 @@ struct Theme {
 };
 static D2D1_COLOR_F C(UINT32 rgb, float a = 1.f) { return ColorF(rgb, a); }
 
-static const Theme kThemes[] = {
+static Theme kThemes[] = {
     {L"Dark", C(0x2F2D2B, .95f), C(0x292725, .97f), C(0xFFFFFF, .13f), C(0xFFFFFF, .04f), C(0xEDEBE8),
      C(0x8E8983), C(0x726D67), C(0x60CDFF), C(0xFFFFFF, .07f), C(0xFFFFFF, .07f), .60f},
     {L"Light", C(0xFAFAFA, .93f), C(0xF1F1F1, .95f), C(0xFFFFFF, .80f), C(0x000000, .07f), C(0x1A1A1A),
@@ -149,6 +169,9 @@ static const Theme kThemes[] = {
      C(0x7FA394), C(0x5F7E72), C(0x5EE6A8), C(0xB4FFDD, .08f), C(0xB4FFDD, .07f), .60f},
     {L"OLED", C(0x000000, .985f), C(0x000000, .99f), C(0xFFFFFF, .12f), C(0xFFFFFF, .05f), C(0xFFFFFF),
      C(0x8A8A8A), C(0x5E5E5E), C(0x60CDFF), C(0xFFFFFF, .08f), C(0xFFFFFF, .09f), .70f},
+    // "> theme new" fills this one in
+    {L"Custom", C(0x2F2D2B, .74f), C(0x292725, .82f), C(0xFFFFFF, .13f), C(0xFFFFFF, .04f), C(0xEDEBE8),
+     C(0x8E8983), C(0x726D67), C(0x60CDFF), C(0xFFFFFF, .07f), C(0xFFFFFF, .07f), .62f},
 };
 constexpr int kThemeCount = (int)(sizeof(kThemes) / sizeof(kThemes[0]));
 
@@ -226,13 +249,56 @@ constexpr int kBackdropScale = 4;                   // backdrop is blurred at 1/
 #define WM_APP_GAMES (WM_APP + 6)
 #define WM_APP_PINS (WM_APP + 7)
 #define WM_APP_FONT (WM_APP + 8)  // a font finished downloading
+#define WM_APP_PANEL (WM_APP + 9)  // a panel's data changed (wp 1: currency rates, 2: a switch failed)
 #define TIMER_UPDATE_CHECK 1
+#define TIMER_TICK 2  // a running timer
 
 enum { ID_OPEN = 1, ID_AUTOSTART, ID_INTERCEPT, ID_EXPANDED, ID_EXIT, ID_THEME0 = 100 };
 
 // Results, Games and Pins are all lists of apps (g_results).
-enum class Mode { None, Results, Commands, Themes, Games, Pins, Fonts, Caret };
+enum class Mode { None, Results, Commands, Themes, Games, Pins, Fonts, Caret, Panel };
 static bool IsAppList(Mode m) { return m == Mode::Results || m == Mode::Games || m == Mode::Pins; }
+
+// Panels (panels.inl and the files after it): every "> command" added in 1.5.
+struct PRow {
+    std::wstring glyph, title, detail;
+    std::wstring icon;    // a file / app whose icon replaces the glyph
+    std::wstring action;  // right-hand text on the selected row ("Copy  ↵")
+    int tag = 0;
+    bool on = false;      // detail in the accent color
+    D2D1_COLOR_F swatch{0, 0, 0, 0};  // a color dot instead of the glyph
+};
+static std::vector<PRow> g_prows;
+static int g_panel = -1;         // the open panel (Mode::Panel)
+static std::wstring g_panelArg;  // what's typed after its name
+static int g_userCmd = -1, g_runPanel = -1;
+static std::wstring g_flash;  // a short message where the hint goes ("Copied")
+static double g_flashTime = -10;
+static int g_layAnim = 0;     // "> layout": 0 rise, 1 pop, 2 fade, 3 drop
+static std::wstring g_inlineCopy, g_inlineUrl;  // what Enter does with "12*7" / "g cats"
+static int PanelMatch(const std::wstring& ql, const std::wstring& q, std::wstring& arg);
+static int UserCmdMatch(const std::wstring& ql, const std::wstring& q, std::wstring& arg);
+static void PanelFill(bool first);
+static void PanelLeave();
+static void PanelTick(double now);
+static bool PanelHasRows();
+static int PanelItemCount();
+static float PanelHeight();
+static std::wstring CmdKey(int id);
+static std::wstring CmdTitle(int id);
+static std::wstring CmdGlyph(int id);
+static std::wstring CmdDetailOf(int id);
+static void CmdRun(int id);
+static void CmdListFill(const std::wstring& q);
+static std::wstring InlineAnswer(const std::wstring& text, bool appStartsWithText);
+static bool InlineActivate();
+static void DrawPanelRow(const PRow& r, float y, bool isSel, float rowA, double now);
+static void DrawStatusStrip(float leftLimit, float rightEdge, float alpha, double now);
+static void ReleaseWidgetBitmaps();
+static void WidgetsOnShow();
+static void SoundTyped();
+static void SoundOpened();
+static void VizStop();
 
 template <class T>
 static void SafeRelease(T*& p) {
@@ -250,6 +316,7 @@ static HICON g_trayIcon;
 
 static ID2D1Factory1* g_d2d;
 static IDWriteFactory* g_dw;
+static IDWriteTextFormat *g_fmtBig, *g_fmtBigC, *g_fmtMid, *g_fmtSmall, *g_fmtSmallC, *g_fmtSmallR, *g_fmtHintL, *g_fmtEmoji;
 static IDWriteTextFormat *g_fmtText, *g_fmtHint, *g_fmtRow, *g_fmtRowRight, *g_fmtGlyph, *g_fmtHeader, *g_fmtCard,
     *g_fmtTile, *g_fmtMenu, *g_fmtGlyphSm;
 static IDWriteTextLayout* g_placeholderLayout;
@@ -1366,7 +1433,7 @@ static std::wstring CommandDetail(int c) {
     case CMD_EXPANDED: return g_expanded ? L"On" : L"Off";
     case CMD_STARTUP: return g_autostart ? L"On" : L"Off";
     }
-    return L"";
+    return c >= kCmdCount ? CmdDetailOf(c) : L"";
 }
 
 static void RecomputeGhost() {
@@ -1376,7 +1443,7 @@ static void RecomputeGhost() {
         if (g_sel >= 0 && g_sel < (int)g_cmdList.size()) {
             size_t gt = lt.find(L'>');
             std::wstring q = Lower(Trim(g_text.substr(gt + 1)));
-            std::wstring key = kCmds[g_cmdList[g_sel]].key;
+            std::wstring key = CmdKey(g_cmdList[g_sel]);
             if (!q.empty() && StartsWith(key, q) && !lt.empty() && !std::iswspace(lt.back()))
                 g_ghost = key.substr(q.size());
         }
@@ -1393,12 +1460,22 @@ static void UpdateState() {
     g_results.clear();
     g_cmdList.clear();
     g_hasMatch = false;
+    g_inlineCopy.clear();
+    g_inlineUrl.clear();
+    int newPanel = -1;
+    std::wstring inlineHint;
 
     std::wstring tl = Lower(Trim(g_text));
     if (!tl.empty() && tl[0] == L'>') {
-        std::wstring q = Trim(tl.substr(1));
+        std::wstring q = Trim(tl.substr(1)), qo = Trim(Trim(g_text).substr(1));
         auto word = [&](const wchar_t* w) { return q == w || StartsWith(q, std::wstring(w) + L" "); };
-        if (q == L"theme" || q == L"themes" || StartsWith(q, L"theme ")) {
+        std::wstring parg;
+        int pm = PanelMatch(q, qo, parg), um = -1;
+        if (pm >= 0 && StartsWith(q, L"theme ")) {  // "> theme new" beats the theme picker
+            g_mode = Mode::Panel;
+            newPanel = pm;
+            g_panelArg = parg;
+        } else if (q == L"theme" || q == L"themes" || StartsWith(q, L"theme ")) {
             g_mode = Mode::Themes;
         } else if (word(L"font") || word(L"fonts")) {
             g_mode = Mode::Fonts;
@@ -1428,11 +1505,18 @@ static void UpdateState() {
                 a.detail = p.hidden ? L"Hidden" : L"Shown";
                 g_results.push_back(a);
             }
+        } else if (pm >= 0) {
+            g_mode = Mode::Panel;
+            newPanel = pm;
+            g_panelArg = parg;
+        } else if ((um = UserCmdMatch(q, qo, parg)) >= 0) {
+            g_mode = Mode::Panel;
+            newPanel = g_runPanel;
+            g_userCmd = um;
+            g_panelArg = parg;
         } else {
             g_mode = Mode::Commands;
-            for (int i = 0; i < kCmdCount; i++)
-                if (q.empty() || StartsWith(kCmds[i].key, q) || Lower(kCmds[i].title).find(q) != std::wstring::npos)
-                    g_cmdList.push_back(i);
+            CmdListFill(q);
         }
     } else if (!tl.empty()) {
         std::vector<std::pair<int, int>> scored;
@@ -1449,11 +1533,17 @@ static void UpdateState() {
         g_hasMatch = !g_results.empty();
         if (g_hasMatch) g_match = g_results[0];
         g_mode = (g_expanded && g_hasMatch) ? Mode::Results : Mode::None;
+        // math, conversions and web shortcuts answer on the right of the bar
+        inlineHint = InlineAnswer(g_text, g_hasMatch && StartsWith(g_match.lower, tl));
+        if (!inlineHint.empty()) g_mode = Mode::None;
     } else {
         g_mode = Mode::None;
     }
 
-    if (g_mode != old) {
+    bool panelChanged = g_mode == Mode::Panel && old == Mode::Panel && newPanel != g_panel;
+    if (old == Mode::Panel && (g_mode != Mode::Panel || panelChanged)) PanelLeave();
+    if (g_mode == Mode::Panel) g_panel = newPanel;
+    if (g_mode != old || panelChanged) {
         if (old == Mode::Themes) SetPreview(g_themeIdx);  // leaving without applying reverts the preview
         g_sel = (g_mode == Mode::Themes) ? g_themeIdx : 0;
         if (g_mode == Mode::Fonts) FontEnter();
@@ -1466,7 +1556,7 @@ static void UpdateState() {
         }
         g_listTop = 0;
         g_listOff = 0;
-    } else if (IsAppList(g_mode) || g_mode == Mode::Commands) {
+    } else if (IsAppList(g_mode) || g_mode == Mode::Commands || g_mode == Mode::Panel) {
         g_sel = 0;
         g_listTop = 0;
     } else if (g_mode == Mode::Fonts) {
@@ -1475,10 +1565,11 @@ static void UpdateState() {
     } else if (g_mode == Mode::Caret) {
         CaretEnter();
     }
+    if (g_mode == Mode::Panel) PanelFill(true);
     RecomputeGhost();
 
-    std::wstring hint;
-    if (g_mode == Mode::None && g_hasMatch && !StartsWith(g_match.lower, Lower(g_text))) hint = g_match.name;
+    std::wstring hint = inlineHint;
+    if (hint.empty() && g_mode == Mode::None && g_hasMatch && !StartsWith(g_match.lower, Lower(g_text))) hint = g_match.name;
     if (hint != g_hintName) { g_hintName = hint; g_hintTime = Now(); }
 }
 
@@ -1491,6 +1582,7 @@ static int ItemCount() {
     case Mode::Themes: return kThemeCount;
     case Mode::Fonts: return FontCount();
     case Mode::Caret: return CaretCount();
+    case Mode::Panel: return PanelItemCount();
     default: return 0;
     }
 }
@@ -1498,7 +1590,7 @@ static int ItemCount() {
 static float ThemeGridHeight() {
     using namespace Lay;
     int rows = (kThemeCount + GridCols - 1) / GridCols;
-    return GridPad + GridHeaderH + rows * (CardPreviewH + CardNameH) + (rows - 1) * 4.f + GridPad - 4.f;
+    return std::min(MaxPanelH, GridPad + GridHeaderH + rows * (CardPreviewH + CardNameH) + (rows - 1) * 4.f + GridPad - 4.f);
 }
 
 static float PanelTargetH() {
@@ -1508,10 +1600,11 @@ static float PanelTargetH() {
     case Mode::Games:
     case Mode::Pins:  // an empty list still shows one line ("Looking for games...")
         return PanelPad * 2 + RowH * std::clamp((int)g_results.size(), 1, MaxRows);
-    case Mode::Commands: return g_cmdList.empty() ? 0.f : PanelPad * 2 + RowH * g_cmdList.size();
+    case Mode::Commands: return g_cmdList.empty() ? 0.f : PanelPad * 2 + RowH * std::min((int)g_cmdList.size(), MaxRows);
     case Mode::Themes: return ThemeGridHeight();
     case Mode::Fonts: return FontPanelH();
     case Mode::Caret: return CaretPanelH();
+    case Mode::Panel: return PanelHeight();
     default: return 0.f;
     }
 }
@@ -1864,6 +1957,14 @@ static void CreateTextResources() {
     g_fmtCard = MakeFormat(fam, 12.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true);
     g_fmtTile = MakeFormat(fam, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true);
     g_fmtMenu = MakeFormat(fam, 13.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    g_fmtBig = MakeFormat(fam, 40.f, DWRITE_FONT_WEIGHT_SEMI_LIGHT, DWRITE_TEXT_ALIGNMENT_LEADING, false);
+    g_fmtBigC = MakeFormat(icons, 32.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+    g_fmtMid = MakeFormat(fam, 19.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    g_fmtSmall = MakeFormat(fam, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    g_fmtSmallC = MakeFormat(fam, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+    g_fmtSmallR = MakeFormat(fam, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false);
+    g_fmtHintL = MakeFormat(fam, Lay::HintSize, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    g_fmtEmoji = MakeFormat(L"Segoe UI Emoji", 25.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
     wchar_t lang[16] = {};
     DWORD sz = sizeof(lang);
     if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"Language", RRF_RT_REG_SZ, nullptr, lang, &sz) == ERROR_SUCCESS)
@@ -1898,6 +1999,7 @@ static void DiscardDeviceResources() {
         for (auto& kv : g_icons) SafeRelease(kv.second.bmp);
     }
     ReleaseFontBitmaps();
+    ReleaseWidgetBitmaps();
     g_rt = nullptr;
     SafeRelease(g_dcrt);
     if (g_ctx) g_ctx->SetTarget(nullptr);
@@ -2288,15 +2390,17 @@ static void DrawTextArea(double now, float dt) {
 
     // Right-hand hint: shows which app Enter will open when it isn't an inline completion.
     float hintW = 0;
-    if (!g_hintName.empty()) {
-        std::wstring hint = g_hintName + L"  ↵";
+    bool flash = !g_flash.empty() && now - g_flashTime < 1.8;
+    std::wstring hintStr = flash ? g_flash : g_hintName.empty() ? L"" : g_hintName + L"  ↵";
+    if (!hintStr.empty()) {
+        const std::wstring& hint = hintStr;
         IDWriteTextLayout* hl = nullptr;
         if (SUCCEEDED(g_dw->CreateTextLayout(hint.c_str(), (UINT32)hint.size(), g_fmtHint, HintMaxW, BarH, &hl))) {
             DWRITE_TEXT_METRICS tm;
             hl->GetMetrics(&tm);
             hintW = std::min(tm.widthIncludingTrailingWhitespace, HintMaxW);
-            float o = Clamp01((now - g_hintTime) / 0.16);
-            g_solid->SetColor(WithA(th.dim, (float)EaseOutCubic(o)));
+            float o = Clamp01((now - (flash ? g_flashTime : g_hintTime)) / 0.16);
+            g_solid->SetColor(WithA(flash ? th.accent : th.dim, (float)EaseOutCubic(o)));
             g_rt->DrawTextLayout({rightEdge - HintMaxW + (1 - o) * 6.f, Margin}, hl, g_solid);
             hl->Release();
         }
@@ -2379,6 +2483,15 @@ static void DrawTextArea(double now, float dt) {
     double idle = now - g_lastInput;
     float blink = idle < 0.5 ? 1.f : (float)(0.5 + 0.5 * std::cos((idle - 0.5) * 2 * 3.14159265 / 1.05));
     float intro = Clamp01((now - g_showTime - 0.10) / 0.22);
+
+    // clock, weather, what's playing: on the right while nothing is typed
+    float phW = 0;
+    if (g_placeholderLayout) {
+        DWRITE_TEXT_METRICS pm;
+        g_placeholderLayout->GetMetrics(&pm);
+        phW = pm.width;
+    }
+    DrawStatusStrip(ox + phW, rightEdge, hintStr.empty() ? g_placeholderA * (float)EaseOutCubic(intro) : 0.f, now);
     float op = blink * (float)EaseOutCubic(intro);
     float h = CaretH * (1.f + 0.14f * (float)std::exp(-idle * 16.0));
     DrawCaretAndFx(lay, (int)full.size(), tx, cy, op, h, now);
@@ -2400,12 +2513,20 @@ static void DrawLayout(const std::wstring& s, IDWriteTextFormat* fmt, float x, f
 #include "grid.inl"
 
 // List rows (results / commands) with a sliding selection highlight.
+static std::wstring CurPanelEmpty();
 static void DrawRows(float top, float dt, float alpha) {
     using namespace Lay;
     const Theme& th = g_th;
     bool apps = IsAppList(g_drawMode);
-    int n = apps ? (int)g_results.size() : (int)g_cmdList.size();
+    bool prow = g_drawMode == Mode::Panel;
+    int n = apps ? (int)g_results.size() : prow ? (int)g_prows.size() : (int)g_cmdList.size();
     double now = Now();
+    if (n == 0 && prow) {
+        float a = alpha * Clamp01(g_contentA * 1.4);
+        DrawLayout(L"\xE946", g_fmtGlyph, Margin + 20, top + PanelPad, 24, RowH, WithA(th.dim, a));
+        DrawLayout(CurPanelEmpty(), g_fmtRow, Margin + 56, top + PanelPad, BarW - 80, RowH, WithA(th.dim, a));
+        return;
+    }
     if (n == 0) {
         if (g_drawMode == Mode::Games || g_drawMode == Mode::Pins) {
             const wchar_t* msg = g_drawMode == Mode::Pins ? L"Nothing pinned yet. Right-click an app to pin it."
@@ -2493,12 +2614,14 @@ static void DrawRows(float top, float dt, float alpha) {
             }
             if (!right.empty())
                 DrawLayout(right, g_fmtRowRight, Margin + BarW - 160, y, 140, RowH, WithA(rc, rowA * (isSel ? 1.f : 0.8f)));
+        } else if (prow) {
+            DrawPanelRow(g_prows[i], y, isSel, rowA, now);
         } else {
             int c = g_cmdList[i];
-            DrawLayout(kCmds[c].glyph, g_fmtGlyph, ix, y, 24, RowH, WithA(isSel ? th.accent : th.dim, rowA));
-            DrawLayout(kCmds[c].title, g_fmtRow, Margin + 56, y, BarW - 200, RowH,
+            DrawLayout(CmdGlyph(c), g_fmtGlyph, ix, y, 24, RowH, WithA(isSel ? th.accent : th.dim, rowA));
+            DrawLayout(CmdTitle(c), g_fmtRow, Margin + 56, y, BarW - 200, RowH,
                        WithA(isSel ? th.text : LerpC(th.dim, th.text, 0.55f), rowA));
-            std::wstring d = CommandDetail(c);
+            std::wstring d = CmdDetailOf(c);
             bool on = d == L"On";
             DrawLayout(d, g_fmtRowRight, Margin + BarW - 180, y, 160, RowH, WithA(on ? th.accent : th.dim, rowA));
         }
@@ -2595,6 +2718,13 @@ static void DrawThemeGrid(float top, float dt, float alpha, double now) {
 
 #include "fonts.inl"
 #include "caret.inl"
+#include "panels.inl"
+#include "calc.inl"
+#include "widgets.inl"
+#include "tools.inl"
+#include "emoji.inl"
+#include "custom.inl"
+#include "register.inl"
 
 static void DrawPanel(double now, float dt) {
     using namespace Lay;
@@ -2612,6 +2742,7 @@ static void DrawPanel(double now, float dt) {
     if (g_drawMode == Mode::Themes) DrawThemeGrid(top, dt, alpha, now);
     else if (g_drawMode == Mode::Fonts) DrawFontGrid(top, dt, alpha, now);
     else if (g_drawMode == Mode::Caret) DrawCaretGrid(top, dt, alpha, now);
+    else if (g_drawMode == Mode::Panel && !PanelHasRows()) CurPanel()->draw(top, dt, alpha, now);
     else DrawRows(top, dt, alpha);
     g_rt->PopAxisAlignedClip();
 }
@@ -2773,6 +2904,7 @@ static void Render() {
     g_th = LerpTheme(g_thFrom, kThemes[g_previewIdx], (float)EaseOutCubic(Clamp01((now - g_thStart) / 0.35)));
 
     // panel expansion
+    PanelTick(now);
     float target = PanelTargetH();
     g_panelH = Damp(g_panelH, target, 20.f, dt);
     if (std::fabs(g_panelH - target) < 0.25f) g_panelH = target;
@@ -2803,6 +2935,17 @@ static void Render() {
     float a = (float)g_anim;
     float sc = 0.94f + 0.06f * a;
     float ty = (1.f - a) * 16.f;
+    if (g_layAnim == 1) {  // pop
+        double ob = g_animTo > 0.5 ? EaseOutBack(s) : e;
+        sc = 0.86f + 0.14f * (float)(g_animTo > 0.5 ? ob : a);
+        ty = 0;
+    } else if (g_layAnim == 2) {  // fade
+        sc = 1;
+        ty = 0;
+    } else if (g_layAnim == 3) {  // drop
+        sc = 0.985f + 0.015f * a;
+        ty = -(1.f - a) * 22.f;
+    }
     // bar space -> window: the pin area sits above the bar
     Matrix3x2F base = Matrix3x2F::Scale(sc, sc, {Margin + BarW / 2, Margin + BarH / 2}) *
                       Matrix3x2F::Translation(0, ty + PinsMaxH);
@@ -2812,7 +2955,7 @@ static void Render() {
 
     D2D1_RECT_F box = D2D1::RectF(Margin, Margin, Margin + BarW, Margin + BarH + g_panelH);
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(box, Radius, Radius);
-    DrawShadow(box, g_th.shadow);
+    DrawShadow(box, g_th.shadow * (g_layAnim == 1 ? Clamp01(a) : 1.f));
     FillAcrylic(rr, g_th, Margin, Margin + BarH);
 
     DrawPanel(now, dt);
@@ -2910,8 +3053,10 @@ static void Show() {
         g_dragging = false;
         g_pinRowOff = 0;
         for (auto& p : g_pins) { p.placed = false; p.hover = p.press = 0; }
+        ApplyLayout();  // a new width / position from "> layout"
         PositionOnMonitor();
         CaptureBackdrop();
+        g_flash.clear();
         g_text.clear();
         g_birth.clear();
         g_caret = g_anchor = 0;
@@ -2926,8 +3071,9 @@ static void Show() {
         g_previewIdx = g_themeIdx;
         g_th = g_thFrom = kThemes[g_themeIdx];
         UpdateState();
+        SoundOpened();
     }
-    StartAnim(1.0, 0.32);
+    StartAnim(1.0, g_layAnim == 1 ? 0.38 : 0.32);
     g_visible = true;
     PublishBox();
     SetBarOpen(true);
@@ -2936,6 +3082,7 @@ static void Show() {
     SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     ForceForeground(g_hwnd);
     RefreshApps(false);
+    WidgetsOnShow();
 }
 
 static void Hide() {
@@ -2949,6 +3096,7 @@ static void Hide() {
     g_pressPin = -1;
     g_sbDrag = g_sbHot = false;
     ClearCaretFx();
+    VizStop();
     CloseMenu();
 }
 
@@ -3063,6 +3211,7 @@ static void RunCommand(int c) {
         break;
     case CMD_STARTUP: SetAutoStart(!g_autostart); break;
     case CMD_QUIT: DestroyWindow(g_hwnd); break;
+    default: CmdRun(c); break;
     }
 }
 
@@ -3073,6 +3222,7 @@ static void Activate(bool forceRaw, bool admin) {
     case Mode::Themes: ApplyTheme(g_sel); return;
     case Mode::Fonts: FontActivateSel(); return;
     case Mode::Caret: CaretApplySel(); return;
+    case Mode::Panel: PanelActivate(GetKeyState(VK_SHIFT) < 0); return;
     case Mode::Commands:
         if (g_sel >= 0 && g_sel < (int)g_cmdList.size()) RunCommand(g_cmdList[g_sel]);
         return;
@@ -3102,6 +3252,7 @@ static void Activate(bool forceRaw, bool admin) {
         return;
     default:
         if (q.empty()) return;
+        if (!forceRaw && InlineActivate()) return;
         Launch((g_hasMatch && !forceRaw) ? &g_match : nullptr, q, admin);
     }
 }
@@ -3254,7 +3405,10 @@ static void SetText(const std::wstring& s) {
 
 static void DeleteRange(int a, int b) {
     if (a > b) std::swap(a, b);
-    if (b > a) CaretDeleted(a, b - a);
+    if (b > a) {
+        CaretDeleted(a, b - a);
+        SoundTyped();
+    }
     g_text.erase(a, b - a);
     g_birth.erase(g_birth.begin() + a, g_birth.begin() + b);
     g_caret = g_anchor = a;
@@ -3267,7 +3421,10 @@ static void InsertText(std::wstring s) {
         if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
     if (HasSel()) DeleteSel();
     double t = Now();
-    if (!s.empty()) CaretTyped(g_caret, (int)s.size());
+    if (!s.empty()) {
+        CaretTyped(g_caret, (int)s.size());
+        SoundTyped();
+    }
     g_text.insert(g_caret, s);
     g_birth.insert(g_birth.begin() + g_caret, s.size(), t);
     g_caret += (int)s.size();
@@ -3341,7 +3498,7 @@ static void OnKey(WPARAM vk) {
     bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
     int n = (int)g_text.size();
     bool grid = g_mode == Mode::Themes;
-    bool list = IsAppList(g_mode) || g_mode == Mode::Commands;
+    bool list = IsAppList(g_mode) || g_mode == Mode::Commands || (g_mode == Mode::Panel && PanelHasRows());
     if (g_menuOpen) {  // the menu has the keyboard while it's open
         int n2 = (int)g_menu.size();
         if (vk == VK_ESCAPE) CloseMenu();
@@ -3359,6 +3516,7 @@ static void OnKey(WPARAM vk) {
     }
     if (g_mode == Mode::Fonts && FontKey(vk, shift)) return;
     if (g_mode == Mode::Caret && CaretKey(vk, shift)) return;
+    if (g_mode == Mode::Panel && !ctrl && PanelKey(vk, shift)) return;
     switch (vk) {
     case VK_ESCAPE: Dismiss(); break;
     case VK_APPS:  // the keyboard's menu key opens the right-click menu for the selection
@@ -3374,7 +3532,7 @@ static void OnKey(WPARAM vk) {
     case VK_RETURN: Activate(shift && !ctrl, ctrl && shift); break;
     case VK_TAB:
         if (g_mode == Mode::Commands && g_ghost.empty() && g_sel < (int)g_cmdList.size())
-            SetText(std::wstring(L"> ") + kCmds[g_cmdList[g_sel]].key);
+            SetText(std::wstring(L"> ") + CmdKey(g_cmdList[g_sel]));
         else AcceptGhost();
         break;
     case VK_UP:
@@ -3459,7 +3617,8 @@ static void ScrollBarDragTo(float y) {
     float f = ScrollBarFrac(y);
     if (g_mode == Mode::Fonts) g_fontGrid.ScrollTo(f * g_fontGrid.MaxOff(), true);
     else if (g_mode == Mode::Caret) g_caretGrid.ScrollTo(f * g_caretGrid.MaxOff(), true);
-    else if (IsAppList(g_mode) || g_mode == Mode::Commands) {
+    else if (g_mode == Mode::Panel && CurPanel() && CurPanel()->scrollFrac) CurPanel()->scrollFrac(f);
+    else if (IsAppList(g_mode) || g_mode == Mode::Commands || (g_mode == Mode::Panel && PanelHasRows())) {
         int n = ItemCount(), room = std::max(0, n - Lay::MaxRows);
         g_listOff = f * room;
         g_listTop = std::clamp((int)std::lround(g_listOff), 0, room);
@@ -3566,7 +3725,10 @@ static void ShowTrayMenu() {
     if (cmd >= ID_THEME0 && cmd < ID_THEME0 + kThemeCount) { ApplyTheme(cmd - ID_THEME0); return; }
     switch (cmd) {
     case ID_OPEN: Show(); break;
-    case ID_INTERCEPT: g_intercept = !g_intercept.load(); break;
+    case ID_INTERCEPT:
+        g_intercept = !g_intercept.load();
+        WriteDword(L"Intercept", g_intercept ? 1 : 0);
+        break;
     case ID_EXPANDED:
         g_expanded = !g_expanded;
         WriteDword(L"Expanded", g_expanded ? 1 : 0);
@@ -3588,7 +3750,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_TOGGLE: Toggle(); return 0;
     case WM_APP_HIDE: Hide(); return 0;
     case WM_APP_QUIT: DestroyWindow(h); return 0;
+    case WM_HOTKEY: Toggle(); return 0;
+    case WM_CLIPBOARDUPDATE: ClipChanged(); return 0;
+    case WM_APP_PANEL:
+        if (wp == 2) Flash(L"Windows didn't allow that");
+        if (g_mode == Mode::Panel) PanelFill(false);
+        else if (wp == 1 && (g_mode == Mode::None || g_mode == Mode::Results)) UpdateState();
+        return 0;
     case WM_TIMER:
+        if (wp == TIMER_TICK) {
+            TimerTick();
+            return 0;
+        }
         if (wp == TIMER_UPDATE_CHECK) {
             // Ask Setup (installed next to us) whether GitHub has a newer version; it stays
             // hidden unless there is one, then shows "Update to V<x>?". Never in the middle of
@@ -3690,6 +3863,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 CaretClick(x, y);
                 return 0;
             }
+            if (g_mode == Mode::Panel && CurPanel() && CurPanel()->click && CurPanel()->click(x, y)) return 0;
             int idx = HitItemAt(x, y);
             if (idx >= 0) {
                 Select(idx);
@@ -3697,6 +3871,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 Activate(false, false);
             }
             return 0;
+        }
+        if (g_text.empty()) {  // the clock, weather... on the empty bar
+            int si = StripAt(x, y);
+            if (si >= 0) {
+                SetText(L"> " + g_stripHits[si].cmd);
+                return 0;
+            }
         }
         SetCapture(h);
         MoveCaret(HitTextIndex(x), GetKeyState(VK_SHIFT) < 0);
@@ -3739,7 +3920,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             FontWheel(steps);
         } else if (g_mode == Mode::Caret) {
             CaretWheel(steps);
-        } else if (IsAppList(g_mode) || g_mode == Mode::Commands) {
+        } else if (g_mode == Mode::Panel && CurPanel() && CurPanel()->wheel) {
+            CurPanel()->wheel(steps);
+        } else if (IsAppList(g_mode) || g_mode == Mode::Commands || (g_mode == Mode::Panel && PanelHasRows())) {
             int n = ItemCount();
             g_listTop = std::clamp(g_listTop + steps * 3, 0, std::max(0, n - Lay::MaxRows));
             g_sel = std::clamp(g_sel, g_listTop, std::min(n - 1, g_listTop + Lay::MaxRows - 1));
@@ -3839,8 +4022,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         ScreenToClient(h, &p);
         float s = 96.f / g_dpi, x = p.x * s, y = p.y * s - Lay::PinsMaxH;
         using namespace Lay;
-        bool text = !g_menuOpen && x >= Margin + TextX - 4 && x <= Margin + BarW && y >= Margin && y <= Margin + BarH;
-        SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : (!g_menuOpen && FontHandAt(x, y)) ? IDC_HAND : IDC_ARROW));
+        bool hand = !g_menuOpen && ((g_text.empty() && StripAt(x, y) >= 0) || (g_mode == Mode::Panel && PanelButtonAt(x, y) >= 0) ||
+                                    FontHandAt(x, y));
+        bool text = !hand && !g_menuOpen && x >= Margin + TextX - 4 && x <= Margin + BarW && y >= Margin && y <= Margin + BarH;
+        SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : hand ? IDC_HAND : IDC_ARROW));
         return TRUE;
     }
     case WM_CAPTURECHANGED: g_sbDrag = false; break;
@@ -3866,8 +4051,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     QueryPerformanceFrequency(&g_qpf);
 
+    LoadCustomTheme();
     g_themeIdx = std::clamp((int)ReadDword(L"Theme", 0), 0, kThemeCount - 1);
     LoadCaretSettings();
+    LoadSoundSettings();
+    LoadLayoutSettings();
+    LoadHotkeySettings();
+    RegisterPanels();
     g_expanded = ReadDword(L"Expanded", 1) != 0;
     g_autostart = IsAutoStart();
     g_previewIdx = g_themeIdx;
@@ -3911,6 +4101,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     AddTrayIcon();
+    ClipInit();
+    ApplyHotkey();
     SetTimer(g_hwnd, TIMER_UPDATE_CHECK, 20 * 1000, nullptr);
 
     HANDLE hookReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -3977,7 +4169,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     DiscardDeviceResources();
     SafeRelease(g_placeholderLayout);
     for (auto* f : {g_fmtText, g_fmtHint, g_fmtRow, g_fmtRowRight, g_fmtGlyph, g_fmtHeader, g_fmtCard, g_fmtTile,
-                    g_fmtMenu, g_fmtGlyphSm})
+                    g_fmtMenu, g_fmtGlyphSm, g_fmtBig, g_fmtBigC, g_fmtMid, g_fmtSmall, g_fmtSmallC, g_fmtSmallR, g_fmtHintL,
+                    g_fmtEmoji})
         if (f) f->Release();
     for (auto& kv : g_localFontFmt) SafeRelease(kv.second);
     SafeRelease(g_fontColl);

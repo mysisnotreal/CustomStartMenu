@@ -25,7 +25,7 @@ impl CardGrid {
         CardGrid { cols, prev_h, name_h, row_gap: 8.0, head_h: 28.0, ..Default::default() }
     }
     pub fn card_w(&self) -> f32 {
-        (BAR_W - 2.0 * GRID_PAD - (self.cols as f32 - 1.0) * CARD_GAP) / self.cols as f32
+        (bar_w() - 2.0 * GRID_PAD - (self.cols as f32 - 1.0) * CARD_GAP) / self.cols as f32
     }
     pub fn row_h(&self) -> f32 {
         self.prev_h + self.name_h + self.row_gap
@@ -175,7 +175,7 @@ pub fn draw_scroll_bar(track_top: f32, track_h: f32, frac: f32, visible: f32, al
         b.w = 3.0;
     }
     b.w = damp(b.w, if wide { 6.0 } else { 3.0 }, 18.0, dt);
-    let x1 = MARGIN + BAR_W - 3.0;
+    let x1 = MARGIN + bar_w() - 3.0;
     let x0 = x1 - b.w;
     if wide {
         // a faint track so it's clear where it can go
@@ -187,7 +187,7 @@ pub fn draw_scroll_bar(track_top: f32, track_h: f32, frac: f32, visible: f32, al
 
 pub fn hit(x: f32, y: f32) -> bool {
     let b = sb();
-    b.shown && x >= MARGIN + BAR_W - 16.0 && x <= MARGIN + BAR_W + 2.0 && y >= b.track_top - 4.0 && y <= b.track_top + b.track_h + 4.0
+    b.shown && x >= MARGIN + bar_w() - 16.0 && x <= MARGIN + bar_w() + 2.0 && y >= b.track_top - 4.0 && y <= b.track_top + b.track_h + 4.0
 }
 pub fn on_thumb(y: f32) -> bool {
     let b = sb();

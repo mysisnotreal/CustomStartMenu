@@ -45,22 +45,26 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+mod calc;
 mod caret;
+mod custom;
+mod emoji;
 mod fonts;
-mod grid;
 mod games;
+mod grid;
+mod panels;
 mod pins;
+mod register;
+mod tools;
+mod widgets;
 use games::{refresh_games, GAMES, GAMES_LOADING};
 use pins::*;
 
 // ---------------------------------------------------------------------------
 // Layout (device independent pixels)
 // ---------------------------------------------------------------------------
-const BAR_W: f32 = 620.0;
 const BAR_H: f32 = 56.0;
 const MARGIN: f32 = 52.0; // room around the container for the shadow / animation
-const RADIUS: f32 = 14.0;
-const VERTICAL_POS: f32 = 0.40; // bar center, as a fraction of work-area height
 const LOGO_X: f32 = 20.0;
 const LOGO_SIZE: f32 = 18.0;
 const TEXT_X: f32 = 54.0;
@@ -88,7 +92,6 @@ const MAX_PANEL_H: f32 = PANEL_PAD * 2.0 + ROW_H * MAX_ROWS as f32;
 const PIN_COLS: i32 = 7;
 const PIN_MAX_ROWS: i32 = 3;
 const TILE_GAP: f32 = 10.0;
-const TILE_W: f32 = (BAR_W - (PIN_COLS - 1) as f32 * TILE_GAP) / PIN_COLS as f32;
 const TILE_H: f32 = 80.0;
 const TILE_RADIUS: f32 = 12.0;
 const TILE_ICON: f32 = 32.0;
@@ -103,7 +106,25 @@ const MENU_PAD: f32 = 5.0;
 // The window always has room for the tallest pin area above the bar, so the bar (and the
 // blurred backdrop behind it) never moves when pins are added or hidden. Drawing happens in
 // "bar space", where the bar's top-left corner is (MARGIN, MARGIN) and the pins sit at y < MARGIN.
-const WIN_W: f32 = BAR_W + 2.0 * MARGIN;
+// "> layout" changes these (the size takes effect the next time the bar opens)
+static mut LAY_BAR_W: f32 = 620.0;
+static mut LAY_RADIUS: f32 = 14.0;
+static mut LAY_VERTICAL_POS: f32 = 0.40; // bar center, as a fraction of work-area height
+fn bar_w() -> f32 {
+    unsafe { LAY_BAR_W }
+}
+fn radius() -> f32 {
+    unsafe { LAY_RADIUS }
+}
+fn vertical_pos() -> f32 {
+    unsafe { LAY_VERTICAL_POS }
+}
+fn tile_w() -> f32 {
+    (bar_w() - (PIN_COLS - 1) as f32 * TILE_GAP) / PIN_COLS as f32
+}
+fn win_w() -> f32 {
+    bar_w() + 2.0 * MARGIN
+}
 const WIN_MAX_H: f32 = PINS_MAX_H + BAR_H + MAX_PANEL_H + 2.0 * MARGIN;
 
 // ---------------------------------------------------------------------------
@@ -164,7 +185,7 @@ const fn theme(
     }
 }
 
-const THEMES: [Theme; 8] = [
+static mut THEMES: [Theme; 9] = [
     theme("Dark", c(0x2F2D2B, 0.95), c(0x292725, 0.97), c(0xFFFFFF, 0.13), c(0xFFFFFF, 0.04), c(0xEDEBE8, 1.0),
         c(0x8E8983, 1.0), c(0x726D67, 1.0), c(0x60CDFF, 1.0), c(0xFFFFFF, 0.07), c(0xFFFFFF, 0.07), 0.60),
     theme("Light", c(0xFAFAFA, 0.93), c(0xF1F1F1, 0.95), c(0xFFFFFF, 0.80), c(0x000000, 0.07), c(0x1A1A1A, 1.0),
@@ -181,8 +202,14 @@ const THEMES: [Theme; 8] = [
         c(0x7FA394, 1.0), c(0x5F7E72, 1.0), c(0x5EE6A8, 1.0), c(0xB4FFDD, 0.08), c(0xB4FFDD, 0.07), 0.60),
     theme("OLED", c(0x000000, 0.985), c(0x000000, 0.99), c(0xFFFFFF, 0.12), c(0xFFFFFF, 0.05), c(0xFFFFFF, 1.0),
         c(0x8A8A8A, 1.0), c(0x5E5E5E, 1.0), c(0x60CDFF, 1.0), c(0xFFFFFF, 0.08), c(0xFFFFFF, 0.09), 0.70),
+    // "> theme new" fills this one in
+    theme("Custom", c(0x2F2D2B, 0.74), c(0x292725, 0.82), c(0xFFFFFF, 0.13), c(0xFFFFFF, 0.04), c(0xEDEBE8, 1.0),
+        c(0x8E8983, 1.0), c(0x726D67, 1.0), c(0x60CDFF, 1.0), c(0xFFFFFF, 0.07), c(0xFFFFFF, 0.07), 0.62),
 ];
-const THEME_COUNT: usize = THEMES.len();
+const THEME_COUNT: usize = 9;
+fn themes() -> &'static mut [Theme; THEME_COUNT] {
+    unsafe { &mut *std::ptr::addr_of_mut!(THEMES) }
+}
 
 fn lerp_c(a: D2D1_COLOR_F, b: D2D1_COLOR_F, t: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -270,8 +297,10 @@ const WM_APP_QUIT: u32 = WM_APP + 5; // sent by CSMInstaller before replacing th
 const WM_APP_GAMES: u32 = WM_APP + 6;
 const WM_APP_PINS: u32 = WM_APP + 7;
 const WM_APP_FONT: u32 = WM_APP + 8; // a font finished downloading
+const WM_APP_PANEL: u32 = WM_APP + 9; // a panel's data changed (wp 1: currency rates, 2: a switch failed)
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_UPDATE_CHECK: usize = 1;
+const TIMER_TICK: usize = 2; // a running timer
 
 const ID_OPEN: usize = 1;
 const ID_AUTOSTART: usize = 2;
@@ -291,6 +320,7 @@ enum Mode {
     Pins,
     Fonts,
     Caret,
+    Panel,
 }
 fn is_app_list(m: Mode) -> bool {
     matches!(m, Mode::Results | Mode::Games | Mode::Pins)
@@ -562,6 +592,14 @@ struct State {
     fmt_tile: IDWriteTextFormat,
     fmt_menu: IDWriteTextFormat,
     fmt_glyph_sm: IDWriteTextFormat,
+    fmt_big: IDWriteTextFormat,
+    fmt_big_c: IDWriteTextFormat,
+    fmt_mid: IDWriteTextFormat,
+    fmt_small: IDWriteTextFormat,
+    fmt_small_c: IDWriteTextFormat,
+    fmt_small_r: IDWriteTextFormat,
+    fmt_hint_l: IDWriteTextFormat,
+    fmt_emoji: IDWriteTextFormat,
     placeholder_layout: Option<IDWriteTextLayout>,
 
     // Rendering backends. Hardware acceleration (the default, chosen in Setup) draws on the
@@ -805,7 +843,7 @@ fn apply_theme(idx: usize) {
         set_preview(s.theme_idx);
     } else {
         s.preview_idx = s.theme_idx;
-        s.th = THEMES[s.theme_idx];
+        s.th = themes()[s.theme_idx];
         s.th_from = s.th;
     }
 }
@@ -1088,7 +1126,7 @@ fn command_detail(c: usize) -> String {
 fn command_detail_str(c: usize) -> &'static str {
     let s = st();
     match c {
-        CMD_THEME => THEMES[s.theme_idx].name,
+        CMD_THEME => themes()[s.theme_idx].name,
         CMD_EXPANDED => {
             if s.expanded {
                 "On"
@@ -1115,7 +1153,7 @@ fn recompute_ghost() {
         if s.sel >= 0 && (s.sel as usize) < s.cmd_list.len() {
             let gt = lt.iter().position(|&c| c == b'>' as u16).unwrap_or(0);
             let q = lower(&trim(&s.text[gt + 1..]));
-            let key = ws(CMDS[s.cmd_list[s.sel as usize]].key);
+            let key = ws(&panels::cmd_key(s.cmd_list[s.sel as usize]));
             if !q.is_empty() && starts_with(&key, &q) && !lt.is_empty() && !is_space(*lt.last().unwrap()) {
                 s.ghost = key[q.len()..].to_vec();
             }
@@ -1142,12 +1180,27 @@ fn update_state() {
     s.results.clear();
     s.cmd_list.clear();
     s.has_match = false;
+    let pst = panels::ps();
+    pst.inline_copy.clear();
+    pst.inline_url.clear();
+    let mut new_panel = -1;
+    let mut inline_hint = String::new();
 
     let tl = lower(&trim(&s.text));
     if !tl.is_empty() && tl[0] == b'>' as u16 {
         let q = trim(&tl[1..]);
+        let qs = String::from_utf16_lossy(&q);
+        let qo = String::from_utf16_lossy(&trim(&trim(&s.text)[1..]));
         let word = |w: &str| q == ws(w) || starts_with(&q, &ws(&format!("{} ", w)));
-        if q == ws("theme") || q == ws("themes") || starts_with(&q, &ws("theme ")) {
+        let pm = panels::panel_match(&qs, &qo);
+        let um = if pm.is_none() { tools::user_cmd_match(&qs, &qo) } else { None };
+        if pm.is_some() && qs.starts_with("theme ") {
+            // "> theme new" beats the theme picker
+            let (i, a) = pm.clone().unwrap();
+            s.mode = Mode::Panel;
+            new_panel = i as i32;
+            pst.arg = a;
+        } else if q == ws("theme") || q == ws("themes") || starts_with(&q, &ws("theme ")) {
             s.mode = Mode::Themes;
         } else if word("font") || word("fonts") {
             s.mode = Mode::Fonts;
@@ -1177,13 +1230,18 @@ fn update_state() {
                 a.detail = ws(if p.hidden { "Hidden" } else { "Shown" });
                 s.results.push(a);
             }
+        } else if let Some((i, a)) = pm {
+            s.mode = Mode::Panel;
+            new_panel = i as i32;
+            pst.arg = a;
+        } else if let Some((i, a)) = um {
+            s.mode = Mode::Panel;
+            new_panel = pst.run_panel;
+            pst.user_cmd = i as i32;
+            pst.arg = a;
         } else {
             s.mode = Mode::Commands;
-            for (i, cmd) in CMDS.iter().enumerate() {
-                if q.is_empty() || starts_with(&ws(cmd.key), &q) || find(&lower(&ws(cmd.title)), &q).is_some() {
-                    s.cmd_list.push(i);
-                }
-            }
+            panels::cmd_list_fill(&qs);
         }
     } else if !tl.is_empty() {
         let apps = APPS.read().unwrap();
@@ -1199,11 +1257,23 @@ fn update_state() {
             s.match_app = s.results[0].clone();
         }
         s.mode = if s.expanded && s.has_match { Mode::Results } else { Mode::None };
+        // math, conversions and web shortcuts answer on the right of the bar
+        inline_hint = calc::inline_answer(&String::from_utf16_lossy(&s.text), s.has_match && starts_with(&s.match_app.lower, &tl));
+        if !inline_hint.is_empty() {
+            s.mode = Mode::None;
+        }
     } else {
         s.mode = Mode::None;
     }
 
-    if s.mode != old {
+    let panel_changed = s.mode == Mode::Panel && old == Mode::Panel && new_panel != pst.panel;
+    if old == Mode::Panel && (s.mode != Mode::Panel || panel_changed) {
+        panels::leave();
+    }
+    if s.mode == Mode::Panel {
+        pst.panel = new_panel;
+    }
+    if s.mode != old || panel_changed {
         if old == Mode::Themes {
             set_preview(s.theme_idx); // leaving without applying reverts the preview
         }
@@ -1221,7 +1291,7 @@ fn update_state() {
         }
         s.list_top = 0;
         s.list_off = 0.0;
-    } else if is_app_list(s.mode) || s.mode == Mode::Commands {
+    } else if is_app_list(s.mode) || s.mode == Mode::Commands || s.mode == Mode::Panel {
         s.sel = 0;
         s.list_top = 0;
     } else if s.mode == Mode::Fonts {
@@ -1230,10 +1300,13 @@ fn update_state() {
     } else if s.mode == Mode::Caret {
         caret::enter();
     }
+    if s.mode == Mode::Panel {
+        panels::fill(true);
+    }
     recompute_ghost();
 
-    let mut hint = Vec::new();
-    if s.mode == Mode::None && s.has_match && !starts_with(&s.match_app.lower, &lower(&s.text)) {
+    let mut hint = ws(&inline_hint);
+    if hint.is_empty() && s.mode == Mode::None && s.has_match && !starts_with(&s.match_app.lower, &lower(&s.text)) {
         hint = s.match_app.name.clone();
     }
     if hint != s.hint_name {
@@ -1250,13 +1323,14 @@ fn item_count() -> i32 {
         Mode::Themes => THEME_COUNT as i32,
         Mode::Fonts => fonts::count(),
         Mode::Caret => caret::count(),
+        Mode::Panel => panels::item_count(),
         Mode::None => 0,
     }
 }
 
 fn theme_grid_height() -> f32 {
     let rows = THEME_COUNT.div_ceil(GRID_COLS) as f32;
-    GRID_PAD + GRID_HEADER_H + rows * (CARD_PREVIEW_H + CARD_NAME_H) + (rows - 1.0) * 4.0 + GRID_PAD - 4.0
+    MAX_PANEL_H.min(GRID_PAD + GRID_HEADER_H + rows * (CARD_PREVIEW_H + CARD_NAME_H) + (rows - 1.0) * 4.0 + GRID_PAD - 4.0)
 }
 
 fn panel_target_h() -> f32 {
@@ -1269,12 +1343,13 @@ fn panel_target_h() -> f32 {
             if s.cmd_list.is_empty() {
                 0.0
             } else {
-                PANEL_PAD * 2.0 + ROW_H * s.cmd_list.len() as f32
+                PANEL_PAD * 2.0 + ROW_H * s.cmd_list.len().min(MAX_ROWS) as f32
             }
         }
         Mode::Themes => theme_grid_height(),
         Mode::Fonts => fonts::panel_h(),
         Mode::Caret => caret::panel_h(),
+        Mode::Panel => panels::height(),
         Mode::None => 0.0,
     }
 }
@@ -1478,7 +1553,7 @@ fn publish_box() {
     let s = st();
     let sc = s.dpi / 96.0;
     // bar space -> window: y + PINS_MAX_H
-    let (mut l, mut t, mut r, mut b) = (MARGIN, MARGIN - pins_area_h(), MARGIN + BAR_W, MARGIN + BAR_H + s.panel_h);
+    let (mut l, mut t, mut r, mut b) = (MARGIN, MARGIN - pins_area_h(), MARGIN + bar_w(), MARGIN + BAR_H + s.panel_h);
     if s.menu_open {
         l = l.min(s.menu_pos.x);
         r = r.max(s.menu_pos.x + MENU_W);
@@ -1693,6 +1768,14 @@ struct Formats {
     card: IDWriteTextFormat,
     tile: IDWriteTextFormat,
     menu: IDWriteTextFormat,
+    big: IDWriteTextFormat,
+    big_c: IDWriteTextFormat,
+    mid: IDWriteTextFormat,
+    small: IDWriteTextFormat,
+    small_c: IDWriteTextFormat,
+    small_r: IDWriteTextFormat,
+    hint_l: IDWriteTextFormat,
+    emoji: IDWriteTextFormat,
     placeholder: Option<IDWriteTextLayout>,
 }
 
@@ -1723,6 +1806,14 @@ fn build_formats(dw: &IDWriteFactory) -> Formats {
         card: make_format(dw, fam, 12.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
         tile: make_format(dw, fam, 11.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true),
         menu: make_format(dw, fam, 13.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
+        big: make_format(dw, fam, 40.0, DWRITE_FONT_WEIGHT_SEMI_LIGHT, DWRITE_TEXT_ALIGNMENT_LEADING, false),
+        big_c: make_format(dw, icons, 32.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false),
+        mid: make_format(dw, fam, 19.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, true),
+        small: make_format(dw, fam, 11.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
+        small_c: make_format(dw, fam, 11.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false),
+        small_r: make_format(dw, fam, 11.5, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false),
+        hint_l: make_format(dw, fam, HINT_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true),
+        emoji: make_format(dw, "Segoe UI Emoji", 25.0, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false),
         text,
         placeholder,
     }
@@ -1742,6 +1833,14 @@ fn rebuild_formats() {
     s.fmt_card = f.card;
     s.fmt_tile = f.tile;
     s.fmt_menu = f.menu;
+    s.fmt_big = f.big;
+    s.fmt_big_c = f.big_c;
+    s.fmt_mid = f.mid;
+    s.fmt_small = f.small;
+    s.fmt_small_c = f.small_c;
+    s.fmt_small_r = f.small_r;
+    s.fmt_hint_l = f.hint_l;
+    s.fmt_emoji = f.emoji;
     s.placeholder_layout = f.placeholder;
 }
 
@@ -1756,6 +1855,7 @@ fn make_gradient(a: D2D_POINT_2F, b: D2D_POINT_2F, ca: D2D1_COLOR_F, cb: D2D1_CO
 
 fn discard_device_resources() {
     let s = st();
+    widgets::release_bitmaps();
     s.solid = None;
     s.logo_brush = None;
     s.bar_shadow.bmp = None;
@@ -2038,7 +2138,7 @@ fn position_on_monitor() {
         }
         s.dpi = dx as f32;
         let sc = s.dpi / 96.0;
-        let w = (WIN_W * sc).ceil() as i32;
+        let w = (win_w() * sc).ceil() as i32;
         let h = (WIN_MAX_H * sc).ceil() as i32;
         ensure_surface(w, h);
         if let Some(rt) = &s.rt {
@@ -2050,7 +2150,7 @@ fn position_on_monitor() {
         // Centered horizontally, sitting a little above the vertical middle of the screen, and
         // lower if that's needed for the pinned tiles above it to fit.
         let wa = mi.rcWork;
-        let mut bar_top = wa.top + ((wa.bottom - wa.top) as f32 * VERTICAL_POS - BAR_H / 2.0 * sc).round() as i32;
+        let mut bar_top = wa.top + ((wa.bottom - wa.top) as f32 * vertical_pos() - BAR_H / 2.0 * sc).round() as i32;
         bar_top = bar_top.max(wa.top + ((pins_area_h() + 16.0) * sc).round() as i32);
         s.win_pos.x = (wa.left + wa.right) / 2 - w / 2;
         s.win_pos.y = bar_top - ((MARGIN + PINS_MAX_H) * sc).round() as i32;
@@ -2308,21 +2408,30 @@ fn draw_text_area(t_now: f64, dt: f32) {
     let s = st();
     let th = s.th;
     let ox = MARGIN + TEXT_X;
-    let right_edge = MARGIN + BAR_W - RIGHT_PAD;
+    let right_edge = MARGIN + bar_w() - RIGHT_PAD;
     let cy = MARGIN + BAR_H / 2.0;
 
     unsafe {
         // Right-hand hint: shows which app Enter will open when it isn't an inline completion.
         let mut hint_w = 0.0f32;
-        if !s.hint_name.is_empty() {
-            let mut hint = s.hint_name.clone();
-            hint.extend(ws("  ↵"));
+        let pst = panels::ps();
+        let flash = !pst.flash.is_empty() && t_now - pst.flash_time < 1.8;
+        let hint: WStr = if flash {
+            ws(&pst.flash)
+        } else if s.hint_name.is_empty() {
+            Vec::new()
+        } else {
+            let mut h = s.hint_name.clone();
+            h.extend(ws("  ↵"));
+            h
+        };
+        if !hint.is_empty() {
             if let Some(hl) = make_layout(&hint, &s.fmt_hint, HINT_MAX_W, BAR_H) {
                 let mut tm = DWRITE_TEXT_METRICS::default();
                 let _ = hl.GetMetrics(&mut tm);
                 hint_w = tm.widthIncludingTrailingWhitespace.min(HINT_MAX_W);
-                let o = clamp01((t_now - s.hint_time) / 0.16);
-                set_color(with_a(th.dim, ease_out_cubic(o as f64) as f32));
+                let o = clamp01((t_now - if flash { pst.flash_time } else { s.hint_time }) / 0.16);
+                set_color(with_a(if flash { th.accent } else { th.dim }, ease_out_cubic(o as f64) as f32));
                 rt().DrawTextLayout(pt(right_edge - HINT_MAX_W + (1.0 - o) * 6.0, MARGIN), &hl, solid(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
         }
@@ -2413,6 +2522,16 @@ fn draw_text_area(t_now: f64, dt: f32) {
         let idle = t_now - s.last_input;
         let blink = if idle < 0.5 { 1.0 } else { (0.5 + 0.5 * ((idle - 0.5) * 2.0 * std::f64::consts::PI / 1.05).cos()) as f32 };
         let intro = clamp01((t_now - s.show_time - 0.10) / 0.22);
+
+        // clock, weather, what's playing: on the right while nothing is typed
+        let mut ph_w = 0.0;
+        if let Some(pl) = &s.placeholder_layout {
+            let mut pm = DWRITE_TEXT_METRICS::default();
+            let _ = pl.GetMetrics(&mut pm);
+            ph_w = pm.width;
+        }
+        let strip_a = if hint.is_empty() { s.placeholder_a * ease_out_cubic(intro as f64) as f32 } else { 0.0 };
+        widgets::draw_status_strip(ox + ph_w, right_edge, strip_a, t_now);
         let op = blink * ease_out_cubic(intro as f64) as f32;
         let h = CARET_H * (1.0 + 0.14 * (-idle * 16.0).exp() as f32);
         caret::draw_caret_and_fx(&lay, full.len(), tx, cy, op, h, t_now);
@@ -2431,9 +2550,22 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
     let s = st();
     let th = s.th;
     let apps = is_app_list(s.draw_mode);
-    let n = if apps { s.results.len() } else { s.cmd_list.len() } as i32;
+    let prow = s.draw_mode == Mode::Panel;
+    let n = if apps {
+        s.results.len()
+    } else if prow {
+        panels::rows().len()
+    } else {
+        s.cmd_list.len()
+    } as i32;
     let t_now = now();
     let mr = MAX_ROWS as i32;
+    if n == 0 && prow {
+        let a = alpha * clamp01(s.content_a as f64 * 1.4);
+        draw_layout(&ws("\u{E946}"), &s.fmt_glyph, MARGIN + 20.0, top + PANEL_PAD, 24.0, ROW_H, with_a(th.dim, a));
+        draw_layout(&ws(panels::cur_empty()), &s.fmt_row, MARGIN + 56.0, top + PANEL_PAD, bar_w() - 80.0, ROW_H, with_a(th.dim, a));
+        return;
+    }
     if n == 0 {
         if s.draw_mode == Mode::Games || s.draw_mode == Mode::Pins {
             let msg = if s.draw_mode == Mode::Pins {
@@ -2446,7 +2578,7 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
             let a = alpha * clamp01(s.content_a as f64 * 1.4);
             let glyph = if s.draw_mode == Mode::Pins { "\u{E718}" } else { "\u{E7FC}" };
             draw_layout(&ws(glyph), &s.fmt_glyph, MARGIN + 20.0, top + PANEL_PAD, 24.0, ROW_H, with_a(th.dim, a));
-            draw_layout(&ws(msg), &s.fmt_row, MARGIN + 56.0, top + PANEL_PAD, BAR_W - 80.0, ROW_H, with_a(th.dim, a));
+            draw_layout(&ws(msg), &s.fmt_row, MARGIN + 56.0, top + PANEL_PAD, bar_w() - 80.0, ROW_H, with_a(th.dim, a));
         }
         return;
     }
@@ -2474,7 +2606,7 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
     s.sel_y = top + PANEL_PAD + (s.sel_row - s.list_off) * ROW_H;
 
     // highlight + accent pill
-    fill_rr(rect(MARGIN + 6.0, s.sel_y + 2.0, MARGIN + BAR_W - 6.0, s.sel_y + ROW_H - 2.0), 8.0, with_a(th.highlight, alpha));
+    fill_rr(rect(MARGIN + 6.0, s.sel_y + 2.0, MARGIN + bar_w() - 6.0, s.sel_y + ROW_H - 2.0), 8.0, with_a(th.highlight, alpha));
     fill_rr(
         rect(MARGIN + 8.0, s.sel_y + ROW_H / 2.0 - 8.0, MARGIN + 11.0, s.sel_y + ROW_H / 2.0 + 8.0),
         1.5,
@@ -2496,7 +2628,7 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
         let slide = (1.0 - s.content_a) * (6.0 + (i - first) as f32 * 3.0);
         let y = top + PANEL_PAD + (i as f32 - s.list_off) * ROW_H + slide;
         let row_a = alpha * clamp01(s.content_a as f64 * 1.4 - (i - first) as f64 * 0.06);
-        s.hits.push((rect(MARGIN + 6.0, y, MARGIN + BAR_W - 6.0, y + ROW_H), i));
+        s.hits.push((rect(MARGIN + 6.0, y, MARGIN + bar_w() - 6.0, y + ROW_H), i));
         let is_sel = i == sel;
         let ix = MARGIN + 20.0;
         let iy = y + (ROW_H - 24.0) / 2.0;
@@ -2520,7 +2652,7 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
                 };
             }
             let hidden_pin = s.draw_mode == Mode::Pins && a.detail == ws("Hidden");
-            if let Some(l) = make_layout(&a.name, &s.fmt_row, BAR_W - 200.0, ROW_H) {
+            if let Some(l) = make_layout(&a.name, &s.fmt_row, bar_w() - 200.0, ROW_H) {
                 if !q.is_empty() {
                     if let Some(p) = find(&a.lower, &q) {
                         unsafe {
@@ -2566,28 +2698,31 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
                 draw_layout(
                     &right,
                     &s.fmt_row_right,
-                    MARGIN + BAR_W - 160.0,
+                    MARGIN + bar_w() - 160.0,
                     y,
                     140.0,
                     ROW_H,
                     with_a(rc, row_a * if is_sel { 1.0 } else { 0.8 }),
                 );
             }
+        } else if prow {
+            let r = panels::rows()[i as usize].clone();
+            panels::draw_panel_row(&r, y, is_sel, row_a, t_now);
         } else {
             let cmd = s.cmd_list[i as usize];
-            draw_layout(&ws(CMDS[cmd].glyph), &s.fmt_glyph, ix, y, 24.0, ROW_H, with_a(if is_sel { th.accent } else { th.dim }, row_a));
+            draw_layout(&ws(panels::cmd_glyph(cmd)), &s.fmt_glyph, ix, y, 24.0, ROW_H, with_a(if is_sel { th.accent } else { th.dim }, row_a));
             draw_layout(
-                &ws(CMDS[cmd].title),
+                &ws(&panels::cmd_title(cmd)),
                 &s.fmt_row,
                 MARGIN + 56.0,
                 y,
-                BAR_W - 200.0,
+                bar_w() - 200.0,
                 ROW_H,
                 with_a(if is_sel { th.text } else { lerp_c(th.dim, th.text, 0.55) }, row_a),
             );
-            let d = command_detail(cmd);
+            let d = panels::cmd_detail(cmd);
             let on = d == "On";
-            draw_layout(&ws(&d), &s.fmt_row_right, MARGIN + BAR_W - 180.0, y, 160.0, ROW_H, with_a(if on { th.accent } else { th.dim }, row_a));
+            draw_layout(&ws(&d), &s.fmt_row_right, MARGIN + bar_w() - 180.0, y, 160.0, ROW_H, with_a(if on { th.accent } else { th.dim }, row_a));
         }
     }
 
@@ -2605,7 +2740,7 @@ fn draw_theme_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
     draw_layout(
         &ws("← → preview   ↵ apply"),
         &s.fmt_row_right,
-        MARGIN + BAR_W - GRID_PAD - 260.0,
+        MARGIN + bar_w() - GRID_PAD - 260.0,
         top + GRID_PAD - 4.0,
         258.0,
         GRID_HEADER_H,
@@ -2613,7 +2748,7 @@ fn draw_theme_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
     );
 
     let base = get_transform();
-    let cw = (BAR_W - 2.0 * GRID_PAD - (GRID_COLS as f32 - 1.0) * CARD_GAP) / GRID_COLS as f32;
+    let cw = (bar_w() - 2.0 * GRID_PAD - (GRID_COLS as f32 - 1.0) * CARD_GAP) / GRID_COLS as f32;
     let y0 = top + GRID_PAD + GRID_HEADER_H - 4.0;
     for i in 0..THEME_COUNT {
         let col = i % GRID_COLS;
@@ -2631,7 +2766,7 @@ fn draw_theme_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
         set_transform(&m);
 
         // Preview: the theme's real material on the real blurred desktop.
-        let t = &THEMES[i];
+        let t = &themes()[i];
         unsafe {
             let lp = D2D1_LAYER_PARAMETERS {
                 contentBounds: rect(-f32::MAX, -f32::MAX, f32::MAX, f32::MAX),
@@ -2696,10 +2831,10 @@ fn draw_panel(t_now: f64, dt: f32) {
     let alpha = ease_out_cubic(s.content_a as f64) as f32;
 
     // divider between the bar and the panel
-    fill_rect(rect(MARGIN + 1.0, top, MARGIN + BAR_W - 1.0, top + 1.0), with_a(s.th.divider, clamp01(s.panel_h as f64 / 20.0)));
+    fill_rect(rect(MARGIN + 1.0, top, MARGIN + bar_w() - 1.0, top + 1.0), with_a(s.th.divider, clamp01(s.panel_h as f64 / 20.0)));
 
     unsafe {
-        rt().PushAxisAlignedClip(&rect(MARGIN, top + 1.0, MARGIN + BAR_W, top + s.panel_h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        rt().PushAxisAlignedClip(&rect(MARGIN, top + 1.0, MARGIN + bar_w(), top + s.panel_h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     }
     if s.draw_mode == Mode::Themes {
         draw_theme_grid(top, dt, alpha, t_now);
@@ -2707,6 +2842,8 @@ fn draw_panel(t_now: f64, dt: f32) {
         fonts::draw_grid(top, dt, alpha, t_now);
     } else if s.draw_mode == Mode::Caret {
         caret::draw_grid(top, dt, alpha, t_now);
+    } else if let (Mode::Panel, Some(d)) = (s.draw_mode, panels::cur().and_then(|p| p.draw)) {
+        d(top, dt, alpha, t_now);
     } else {
         draw_rows(top, dt, alpha);
     }
@@ -2736,8 +2873,8 @@ fn draw_tile(pi: usize, alpha: f32, scale: f32, lift: f32, base: &Matrix3x2, t_n
     let th = s.th;
     let p = s.pins[pi].clone();
     let (x, y) = (p.x, p.y);
-    let r = rect(x, y, x + TILE_W, y + TILE_H);
-    set_transform(&m_mul(&m_scale(scale, scale, x + TILE_W / 2.0, y + TILE_H / 2.0), base));
+    let r = rect(x, y, x + tile_w(), y + TILE_H);
+    set_transform(&m_mul(&m_scale(scale, scale, x + tile_w() / 2.0, y + TILE_H / 2.0), base));
     let layer = alpha < 0.999;
     if layer {
         push_layer(alpha);
@@ -2753,14 +2890,14 @@ fn draw_tile(pi: usize, alpha: f32, scale: f32, lift: f32, base: &Matrix3x2, t_n
     if let Some(b) = make_gradient(pt(0.0, y), pt(0.0, y + TILE_H), th.border_top, th.border_bottom) {
         unsafe {
             rt().DrawRoundedRectangle(
-                &rrect(rect(x + 0.5, y + 0.5, x + TILE_W - 0.5, y + TILE_H - 0.5), TILE_RADIUS - 0.5),
+                &rrect(rect(x + 0.5, y + 0.5, x + tile_w() - 0.5, y + TILE_H - 0.5), TILE_RADIUS - 0.5),
                 &b,
                 1.0,
                 None::<&ID2D1StrokeStyle>,
             )
         };
     }
-    let ix = x + (TILE_W - TILE_ICON) / 2.0;
+    let ix = x + (tile_w() - TILE_ICON) / 2.0;
     let iy = y + 12.0;
     let icon = get_icon(icon_key_of(&p.app), s.tile_px);
     let io = match &icon {
@@ -2775,7 +2912,7 @@ fn draw_tile(pi: usize, alpha: f32, scale: f32, lift: f32, base: &Matrix3x2, t_n
             rt().DrawBitmap(bmp, Some(&rect(ix, iy, ix + TILE_ICON, iy + TILE_ICON)), io, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None)
         };
     }
-    draw_layout(&p.app.name, &s.fmt_tile, x + 5.0, y + 50.0, TILE_W - 10.0, 22.0, lerp_c(lerp_c(th.dim, th.text, 0.7), th.text, hl));
+    draw_layout(&p.app.name, &s.fmt_tile, x + 5.0, y + 50.0, tile_w() - 10.0, 22.0, lerp_c(lerp_c(th.dim, th.text, 0.7), th.text, hl));
     if layer {
         unsafe { rt().PopLayer() };
     }
@@ -2823,7 +2960,7 @@ fn draw_pins(base: &Matrix3x2, t_now: f64, dt: f32) {
             dragged_k = k;
             continue;
         }
-        s.pin_hits.push((rect(slot.x, slot.y, slot.x + TILE_W, slot.y + TILE_H), pi as i32));
+        s.pin_hits.push((rect(slot.x, slot.y, slot.x + tile_w(), slot.y + TILE_H), pi as i32));
         let t = (t_now - s.show_time - 0.02 - k as f64 * 0.022) / 0.38;
         let kin = ease_out_back(t.clamp(0.0, 1.0)) as f32;
         let scale = (0.86 + 0.14 * kin) * (1.0 + 0.035 * hover) * (1.0 - 0.05 * press);
@@ -2911,15 +3048,16 @@ fn render() {
             let _ = ShowWindow(hwnd(), SW_HIDE);
         }
         s.preview_idx = s.theme_idx;
-        s.th = THEMES[s.theme_idx];
+        s.th = themes()[s.theme_idx];
         s.th_from = s.th;
         return;
     }
 
     // theme cross-fade
-    s.th = lerp_theme(&s.th_from, &THEMES[s.preview_idx], ease_out_cubic(clamp01((t_now - s.th_start) / 0.35) as f64) as f32);
+    s.th = lerp_theme(&s.th_from, &themes()[s.preview_idx], ease_out_cubic(clamp01((t_now - s.th_start) / 0.35) as f64) as f32);
 
     // panel expansion
+    panels::tick(t_now);
     let target = panel_target_h();
     s.panel_h = damp(s.panel_h, target, 20.0, dt);
     if (s.panel_h - target).abs() < 0.25 {
@@ -2963,17 +3101,32 @@ fn render() {
         }
 
         let a = s.anim as f32;
-        let sc = 0.94 + 0.06 * a;
-        let ty = (1.0 - a) * 16.0;
+        let mut sc = 0.94 + 0.06 * a;
+        let mut ty = (1.0 - a) * 16.0;
+        let lay_anim = panels::ps().lay_anim;
+        if lay_anim == 1 {
+            // pop
+            let ob = if s.anim_to > 0.5 { ease_out_back(p) as f32 } else { a };
+            sc = 0.86 + 0.14 * ob;
+            ty = 0.0;
+        } else if lay_anim == 2 {
+            // fade
+            sc = 1.0;
+            ty = 0.0;
+        } else if lay_anim == 3 {
+            // drop
+            sc = 0.985 + 0.015 * a;
+            ty = -(1.0 - a) * 22.0;
+        }
         // bar space -> window: the pin area sits above the bar
-        let base = m_mul(&m_scale(sc, sc, MARGIN + BAR_W / 2.0, MARGIN + BAR_H / 2.0), &m_translate(0.0, ty + PINS_MAX_H));
+        let base = m_mul(&m_scale(sc, sc, MARGIN + bar_w() / 2.0, MARGIN + BAR_H / 2.0), &m_translate(0.0, ty + PINS_MAX_H));
         set_transform(&base);
 
         draw_pins(&base, t_now, dt);
 
-        let bx = rect(MARGIN, MARGIN, MARGIN + BAR_W, MARGIN + BAR_H + s.panel_h);
-        let rr = rrect(bx, RADIUS);
-        draw_shadow(bx, s.th.shadow, &s.bar_shadow);
+        let bx = rect(MARGIN, MARGIN, MARGIN + bar_w(), MARGIN + BAR_H + s.panel_h);
+        let rr = rrect(bx, radius());
+        draw_shadow(bx, s.th.shadow * if lay_anim == 1 { clamp01(a as f64) } else { 1.0 }, &s.bar_shadow);
         let th = s.th;
         fill_acrylic(&rr, &th, MARGIN, MARGIN + BAR_H);
 
@@ -2981,7 +3134,7 @@ fn render() {
 
         if let Some(b) = make_gradient(pt(0.0, MARGIN), pt(0.0, MARGIN + BAR_H), th.border_top, th.border_bottom) {
             let inner = rect(bx.left + 0.5, bx.top + 0.5, bx.right - 0.5, bx.bottom - 0.5);
-            rt().DrawRoundedRectangle(&rrect(inner, RADIUS - 0.5), &b, 1.0, None::<&ID2D1StrokeStyle>);
+            rt().DrawRoundedRectangle(&rrect(inner, radius() - 0.5), &b, 1.0, None::<&ID2D1StrokeStyle>);
         }
 
         if let Some(lb) = s.logo_brush.clone() {
@@ -3109,8 +3262,10 @@ fn show() {
             p.hover = 0.0;
             p.press = 0.0;
         }
+        custom::apply_layout(); // a new width / position from "> layout"
         position_on_monitor();
         capture_backdrop();
+        panels::ps().flash.clear();
         s.text.clear();
         s.birth.clear();
         s.caret = 0;
@@ -3126,11 +3281,12 @@ fn show() {
         s.show_time = now();
         s.autostart = is_auto_start();
         s.preview_idx = s.theme_idx;
-        s.th = THEMES[s.theme_idx];
+        s.th = themes()[s.theme_idx];
         s.th_from = s.th;
         update_state();
+        custom::sound_opened();
     }
-    start_anim(1.0, 0.32);
+    start_anim(1.0, if panels::ps().lay_anim == 1 { 0.38 } else { 0.32 });
     s.visible = true;
     publish_box();
     set_bar_open(true);
@@ -3142,6 +3298,7 @@ fn show() {
     }
     force_foreground(hwnd());
     refresh_apps(false);
+    widgets::on_show();
 }
 
 fn hide() {
@@ -3165,6 +3322,7 @@ fn hide() {
     s.sb.drag = false;
     s.sb.hot = false;
     caret::clear_fx();
+    widgets::viz_stop();
     close_menu();
 }
 
@@ -3313,7 +3471,7 @@ fn run_command(cmd: usize) {
         CMD_QUIT => unsafe {
             let _ = DestroyWindow(hwnd());
         },
-        _ => {}
+        _ => panels::cmd_run(cmd),
     }
 }
 
@@ -3325,6 +3483,7 @@ fn activate(force_raw: bool, admin: bool) {
         Mode::Themes => apply_theme(s.sel.max(0) as usize),
         Mode::Fonts => fonts::activate_sel(),
         Mode::Caret => caret::apply_sel(),
+        Mode::Panel => panels::activate(key_down(VK_SHIFT.0 as i32)),
         Mode::Commands => {
             if s.sel >= 0 && (s.sel as usize) < s.cmd_list.len() {
                 run_command(s.cmd_list[s.sel as usize]);
@@ -3363,6 +3522,9 @@ fn activate(force_raw: bool, admin: bool) {
         }
         Mode::None => {
             if q.is_empty() {
+                return;
+            }
+            if !force_raw && calc::inline_activate() {
                 return;
             }
             let m = s.match_app.clone();
@@ -3476,9 +3638,9 @@ fn open_menu(app: &App, pin: i32, mut at: D2D_POINT_2F) {
     }
     s.menu_app = app.clone();
     s.menu_pin = pin;
-    // keep it inside the window (bar space: x 0..WIN_W, y -PINS_MAX_H..WIN_MAX_H-PINS_MAX_H)
+    // keep it inside the window (bar space: x 0..win_w(), y -PINS_MAX_H..WIN_MAX_H-PINS_MAX_H)
     let h = menu_h();
-    at.x = at.x.clamp(6.0, WIN_W - MENU_W - 6.0);
+    at.x = at.x.clamp(6.0, win_w() - MENU_W - 6.0);
     let bottom = WIN_MAX_H - PINS_MAX_H - 6.0;
     if at.y + h > bottom {
         at.y = (-PINS_MAX_H + 6.0).max(at.y - h);
@@ -3567,6 +3729,7 @@ fn delete_range(a: usize, b: usize) {
     let (a, b) = if a > b { (b, a) } else { (a, b) };
     if b > a {
         caret::deleted(a, b - a);
+        custom::sound_typed();
     }
     s.text.drain(a..b);
     s.birth.drain(a..b);
@@ -3587,6 +3750,7 @@ fn insert_text(t: &[u16]) {
     let at = s.caret;
     if !t.is_empty() {
         caret::typed(at, t.len());
+        custom::sound_typed();
     }
     s.text.splice(at..at, t.iter().copied());
     s.birth.splice(at..at, std::iter::repeat(tm).take(t.len()));
@@ -3720,7 +3884,7 @@ fn on_key(vk: u16) {
     let shift = key_down(VK_SHIFT.0 as i32);
     let n = s.text.len();
     let grid = s.mode == Mode::Themes;
-    let list = is_app_list(s.mode) || s.mode == Mode::Commands;
+    let list = is_app_list(s.mode) || s.mode == Mode::Commands || (s.mode == Mode::Panel && panels::has_rows());
     let sel = s.sel;
     let gc = GRID_COLS as i32;
     if s.menu_open {
@@ -3752,6 +3916,9 @@ fn on_key(vk: u16) {
     if s.mode == Mode::Caret && caret::on_key(VIRTUAL_KEY(vk), shift) {
         return;
     }
+    if s.mode == Mode::Panel && !ctrl && panels::key(VIRTUAL_KEY(vk), shift) {
+        return;
+    }
     match VIRTUAL_KEY(vk) {
         VK_ESCAPE => dismiss(),
         VK_APPS => {
@@ -3774,7 +3941,7 @@ fn on_key(vk: u16) {
         VK_RETURN => activate(shift && !ctrl, ctrl && shift),
         VK_TAB => {
             if s.mode == Mode::Commands && s.ghost.is_empty() && (sel as usize) < s.cmd_list.len() {
-                set_text(&ws(&format!("> {}", CMDS[s.cmd_list[sel as usize]].key)));
+                set_text(&ws(&format!("> {}", panels::cmd_key(s.cmd_list[sel as usize]))));
             } else {
                 accept_ghost();
             }
@@ -3898,7 +4065,9 @@ fn scroll_bar_drag_to(y: f32) {
     } else if s.mode == Mode::Caret {
         let g = &mut s.cfx.grid;
         g.scroll_to(f * g.max_off(), true);
-    } else if is_app_list(s.mode) || s.mode == Mode::Commands {
+    } else if let (Mode::Panel, Some(sf)) = (s.mode, panels::cur().and_then(|p| p.scroll_frac)) {
+        sf(f);
+    } else if is_app_list(s.mode) || s.mode == Mode::Commands || (s.mode == Mode::Panel && panels::has_rows()) {
         let n = item_count();
         let room = (n - MAX_ROWS as i32).max(0);
         s.list_off = f * room as f32;
@@ -4011,17 +4180,17 @@ fn remove_tray_icon() {
 fn show_tray_menu() {
     unsafe {
         let s = st();
-        let Ok(themes) = CreatePopupMenu() else { return };
-        let names: Vec<WStr> = THEMES.iter().map(|t| wz(t.name)).collect();
+        let Ok(theme_menu) = CreatePopupMenu() else { return };
+        let names: Vec<WStr> = themes().iter().map(|t| wz(t.name)).collect();
         for (i, n) in names.iter().enumerate() {
             let f = if i == s.theme_idx { MF_STRING | MF_CHECKED } else { MF_STRING };
-            let _ = AppendMenuW(themes, f, ID_THEME0 + i, PCWSTR(n.as_ptr()));
+            let _ = AppendMenuW(theme_menu, f, ID_THEME0 + i, PCWSTR(n.as_ptr()));
         }
         let Ok(m) = CreatePopupMenu() else { return };
         let chk = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(m, MF_STRING, ID_OPEN, w!("Open command bar"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(m, MF_POPUP, themes.0 as usize, w!("Theme"));
+        let _ = AppendMenuW(m, MF_POPUP, theme_menu.0 as usize, w!("Theme"));
         let _ = AppendMenuW(m, chk(s.expanded), ID_EXPANDED, w!("Expanded results"));
         let _ = AppendMenuW(m, chk(INTERCEPT.load(Relaxed)), ID_INTERCEPT, w!("Replace Start menu"));
         let _ = AppendMenuW(m, chk(is_auto_start()), ID_AUTOSTART, w!("Start with Windows"));
@@ -4042,7 +4211,11 @@ fn show_tray_menu() {
         }
         match cmd {
             ID_OPEN => show(),
-            ID_INTERCEPT => INTERCEPT.store(!INTERCEPT.load(Relaxed), Relaxed),
+            ID_INTERCEPT => {
+                let on = !INTERCEPT.load(Relaxed);
+                INTERCEPT.store(on, Relaxed);
+                write_dword("Intercept", on as u32);
+            }
             ID_EXPANDED => {
                 s.expanded = !s.expanded;
                 write_dword("Expanded", s.expanded as u32);
@@ -4080,7 +4253,24 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_APP_QUIT => {
             let _ = DestroyWindow(h);
         }
+        WM_HOTKEY => toggle(),
+        WM_CLIPBOARDUPDATE => tools::clip_changed(),
+        WM_APP_PANEL => {
+            if wp.0 == 2 {
+                panels::flash("Windows didn't allow that");
+            }
+            let m = st().mode;
+            if m == Mode::Panel {
+                panels::fill(false);
+            } else if wp.0 == 1 && (m == Mode::None || m == Mode::Results) {
+                update_state();
+            }
+        }
         WM_TIMER => {
+            if wp.0 == TIMER_TICK {
+                widgets::timer_tick();
+                return LRESULT(0);
+            }
             if wp.0 == TIMER_UPDATE_CHECK {
                 // Ask Setup (installed next to us) whether GitHub has a newer version; it stays
                 // hidden unless there is one, then shows "Update to V<x>?". Never in the middle
@@ -4180,7 +4370,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 SetCapture(h);
                 return LRESULT(0);
             }
-            if x < MARGIN || x > MARGIN + BAR_W || y < MARGIN || y > MARGIN + BAR_H + s.panel_h {
+            if x < MARGIN || x > MARGIN + bar_w() || y < MARGIN || y > MARGIN + BAR_H + s.panel_h {
                 hide();
                 return LRESULT(0);
             }
@@ -4201,6 +4391,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     caret::click(x, y);
                     return LRESULT(0);
                 }
+                if let (Mode::Panel, Some(c)) = (s.mode, panels::cur().and_then(|p| p.click)) {
+                    if c(x, y) {
+                        return LRESULT(0);
+                    }
+                }
                 let idx = hit_item_at(x, y);
                 if idx >= 0 {
                     select(idx);
@@ -4208,6 +4403,13 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     activate(false, false);
                 }
                 return LRESULT(0);
+            }
+            if s.text.is_empty() {
+                // the clock, weather... on the empty bar
+                if let Some(cmd) = widgets::strip_at(x, y) {
+                    set_text(&ws(&format!("> {}", cmd)));
+                    return LRESULT(0);
+                }
             }
             SetCapture(h);
             move_caret(hit_text_index(x), key_down(VK_SHIFT.0 as i32));
@@ -4259,7 +4461,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 fonts::wheel(steps);
             } else if s.mode == Mode::Caret {
                 caret::wheel(steps);
-            } else if is_app_list(s.mode) || s.mode == Mode::Commands {
+            } else if let (Mode::Panel, Some(wh)) = (s.mode, panels::cur().and_then(|p| p.wheel)) {
+                wh(steps);
+            } else if is_app_list(s.mode) || s.mode == Mode::Commands || (s.mode == Mode::Panel && panels::has_rows()) {
                 let n = item_count();
                 let mr = MAX_ROWS as i32;
                 s.list_top = (s.list_top + steps * 3).clamp(0, (n - mr).max(0));
@@ -4286,7 +4490,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     let vis = visible_pins();
                     let n_vis = vis.len() as i32;
                     let (mut from, mut best, mut best_d) = (-1i32, -1i32, 1e9f32);
-                    let cx = x - s.grab.x + TILE_W / 2.0;
+                    let cx = x - s.grab.x + tile_w() / 2.0;
                     let cy = y - s.grab.y + TILE_H / 2.0;
                     for kk in 0..n_vis {
                         if vis[kk as usize] as i32 == s.press_pin {
@@ -4297,7 +4501,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                             continue;
                         }
                         let sl = pin_slot(kk, n_vis);
-                        let d = (sl.x + TILE_W / 2.0 - cx).hypot(sl.y + TILE_H / 2.0 - cy);
+                        let d = (sl.x + tile_w() / 2.0 - cx).hypot(sl.y + TILE_H / 2.0 - cy);
                         if d < best_d {
                             best_d = d;
                             best = kk;
@@ -4382,8 +4586,12 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = ScreenToClient(h, &mut p);
             let k = 96.0 / st().dpi;
             let (x, y) = (p.x as f32 * k, p.y as f32 * k - PINS_MAX_H);
-            let text = !st().menu_open && x >= MARGIN + TEXT_X - 4.0 && x <= MARGIN + BAR_W && y >= MARGIN && y <= MARGIN + BAR_H;
-            let hand = !st().menu_open && fonts::hand_at(x, y);
+            let s = st();
+            let hand = !s.menu_open
+                && ((s.text.is_empty() && widgets::strip_at(x, y).is_some())
+                    || (s.mode == Mode::Panel && widgets::button_at(x, y) >= 0)
+                    || fonts::hand_at(x, y));
+            let text = !hand && !s.menu_open && x >= MARGIN + TEXT_X - 4.0 && x <= MARGIN + bar_w() && y >= MARGIN && y <= MARGIN + BAR_H;
             if let Ok(cur) = LoadCursorW(HINSTANCE::default(), if text { IDC_IBEAM } else if hand { IDC_HAND } else { IDC_ARROW }) {
                 SetCursor(cur);
             }
@@ -4438,6 +4646,11 @@ fn main() {
 
         let fm = build_formats(&dw);
 
+        custom::load_custom_theme();
+        custom::load_sound_settings();
+        custom::load_layout_settings();
+        custom::load_hotkey_settings();
+        register::register_panels();
         let theme_idx = (read_dword("Theme", 0) as usize).min(THEME_COUNT - 1);
         // Hardware acceleration (Setup asks; on by default). Falls back to software if there
         // is no usable Direct3D 11 device at all.
@@ -4449,6 +4662,14 @@ fn main() {
             fmt_row_right: fm.row_right,
             fmt_glyph: fm.glyph,
             fmt_glyph_sm: fm.glyph_sm,
+            fmt_big: fm.big,
+            fmt_big_c: fm.big_c,
+            fmt_mid: fm.mid,
+            fmt_small: fm.small,
+            fmt_small_c: fm.small_c,
+            fmt_small_r: fm.small_r,
+            fmt_hint_l: fm.hint_l,
+            fmt_emoji: fm.emoji,
             fmt_header: fm.header,
             fmt_card: fm.card,
             fmt_tile: fm.tile,
@@ -4470,7 +4691,7 @@ fn main() {
             win_h: -1,
             solid: None,
             logo_brush: None,
-            bar_shadow: Shadow::new(SHADOW_SIGMA, RADIUS, SHADOW_OFFSET_Y),
+            bar_shadow: Shadow::new(SHADOW_SIGMA, 14.0, SHADOW_OFFSET_Y),
             tile_shadow: Shadow::new(7.0, 12.0, 3.0),
             bd_px: Vec::new(),
             bd_w: 0,
@@ -4489,8 +4710,8 @@ fn main() {
             expanded: read_dword("Expanded", 1) != 0,
             autostart: is_auto_start(),
             preview_idx: theme_idx,
-            th: THEMES[theme_idx],
-            th_from: THEMES[theme_idx],
+            th: themes()[theme_idx],
+            th_from: themes()[theme_idx],
             th_start: -10.0,
             visible: false,
             anim: 0.0,
@@ -4602,6 +4823,8 @@ fn main() {
 
         WM_TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Relaxed);
         add_tray_icon();
+        tools::clip_init();
+        custom::apply_hotkey();
         SetTimer(h, TIMER_UPDATE_CHECK, 20 * 1000, None);
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();

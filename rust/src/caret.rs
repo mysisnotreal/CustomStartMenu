@@ -641,12 +641,12 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
     let cw = u.grid.card_w();
     let (prev_h, name_h) = (u.grid.prev_h, u.grid.name_h);
     draw_layout(&ws("Caret"), &s.fmt_header, MARGIN + GRID_PAD + 2.0, top + GRID_PAD - 4.0, 200.0, GRID_HEADER_H, with_a(th.dim, alpha));
-    draw_layout(&ws("← → try it   ↵ apply"), &s.fmt_row_right, MARGIN + BAR_W - GRID_PAD - 260.0, top + GRID_PAD - 4.0, 258.0, GRID_HEADER_H, with_a(th.dim, alpha * 0.85));
+    draw_layout(&ws("← → try it   ↵ apply"), &s.fmt_row_right, MARGIN + bar_w() - GRID_PAD - 260.0, top + GRID_PAD - 4.0, 258.0, GRID_HEADER_H, with_a(th.dim, alpha * 0.85));
 
     let c_top = top + grid::TOP_H;
     let c_bottom = top + s.panel_h;
     u.grid.animate(dt);
-    unsafe { rt().PushAxisAlignedClip(&rect(MARGIN, c_top, MARGIN + BAR_W, c_bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    unsafe { rt().PushAxisAlignedClip(&rect(MARGIN, c_top, MARGIN + bar_w(), c_bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
     if u.items.is_empty() {
         draw_layout(&ws("Nothing matches"), &s.fmt_row, MARGIN + GRID_PAD + 2.0, c_top, 300.0, 40.0, with_a(th.dim, alpha));
     }

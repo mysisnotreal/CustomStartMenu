@@ -28,7 +28,7 @@ set "CLFLAGS=/nologo /utf-8 /std:c++17 /O2 /EHsc /W3 /MT /DUNICODE /D_UNICODE"
 
 echo [1/3] C++ backend
 rc /nologo /fo build\app.res cpp\app.rc || exit /b 1
-cl %CLFLAGS% cpp\main.cpp build\app.res /Fo"build\\" /Fe"dist\CSM-cpp.exe" /link /SUBSYSTEM:WINDOWS || exit /b 1
+cl %CLFLAGS% cpp\main.cpp cpp\winrt_bridge.cpp build\app.res /Fo"build\\" /Fe"dist\CSM-cpp.exe" /link /SUBSYSTEM:WINDOWS || exit /b 1
 
 echo [2/3] Installer
 rc /nologo /fo build\installer.res installer\installer.rc || exit /b 1

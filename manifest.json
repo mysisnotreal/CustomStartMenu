@@ -1,11 +1,29 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "assets": {
     "cpp": "CSM-cpp.exe",
     "rust": "CSM-rust.exe",
     "installer": "CSMInstaller.exe"
   },
   "releases": [
+    {
+      "version": "1.5.0",
+      "added": [
+        "> media shows what's playing with its cover, a seek bar, play / pause / skip and a live visualizer",
+        "> weather shows the temperature and sky for your country, with animated icons (only the country is used, nothing more precise)",
+        "> clock (time, date and a calendar), > system (CPU, memory, graphics, storage), > network (download and upload speed only)",
+        "> timer 5m and > stopwatch, with a chime and a notification when time's up",
+        "The time, the weather and what's playing sit on the right of the empty bar; click one to open it",
+        "Type math (12*7.5), units (5 km in mi) or money (20 usd in eur) and the answer shows on the bar; Enter copies it",
+        "Web shortcuts: g cats, yt lofi, w rust and more (> searches to see them all or add your own)",
+        "> windows, > emoji, > clip (clipboard history, kept only in memory), > f to find files, > kill to close an app",
+        "> note and > notes, > volume, > brightness, > wifi, > bluetooth, > dark",
+        "> lock, > sleep, > restart, > shutdown and > signout ask again before they go ahead",
+        "> theme new makes your own theme; > sounds, > layout (position, width, corners, animation) and > hotkey",
+        "Put scripts or apps in the Commands folder (> commandsfolder) and each becomes a > command"
+      ],
+      "removed": []
+    },
     {
       "version": "1.4.0",
       "added": [
@@ -18,7 +36,7 @@
       "removed": []
     },
     {
-      "version": "1.4.0",
+      "version": "1.3.0",
       "added": [
         "> font opens a font picker: 477 free fonts with a preview of each, sorted into categories (SF Pro first, then Sans Serif, Serif, Monospace, Math, Symbols & Emoji and fonts for other languages)",
         "Fonts are only downloaded when you click their Download button, and are used right away",
