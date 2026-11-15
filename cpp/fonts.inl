@@ -14,7 +14,7 @@ static void Select(int idx);
 
 static const wchar_t* kPreviewBase = L"https://raw.githubusercontent.com/mysisnotreal/CustomStartMenu/main/fonts/previews/";
 static const wchar_t* kFontSample = L"The quick brown fox jumps over the lazy dog";
-static const wchar_t* kLocalCat = L"On this PC";
+static const wchar_t* kLocalCat = L"Downloaded";  // fonts in the Fonts folder are listed first, under this
 
 struct FontItem {
     std::wstring cat, name, lower, id, url, file;  // file: its name in the Fonts folder
@@ -25,14 +25,7 @@ static size_t g_fontCatN = 0;            // how many come from the catalog
 static std::wstring g_fontFilter;        // what was typed after "> font"
 static std::vector<int> g_fontList;      // what the panel shows (indices into g_fontCat)
 static std::set<std::wstring> g_fontLocal;  // lower-case file names in the Fonts folder
-struct FontCell {
-    int item;
-    float x, y;  // x in bar space, y from the top of the scrolling area
-};
-static std::vector<FontCell> g_fontCells;
-static std::vector<std::pair<std::wstring, float>> g_fontHeaders;  // category title, y
-static std::vector<float> g_fontCellSel;
-static float g_fontContentH = 0, g_fontOff = 0, g_fontOffTarget = 0;
+static CardGrid g_fontGrid{3, 64.f, 26.f};  // cards in rows of three, by category (cell item = position in g_fontList)
 static std::vector<HitItem> g_fontBtnHits;
 static D2D1_RECT_F g_fontDefaultHit{};
 
@@ -53,14 +46,6 @@ static std::condition_variable g_previewCv;
 static bool g_previewQuit = false;
 static std::vector<std::thread> g_previewThreads;
 static std::unordered_map<std::wstring, IDWriteTextFormat*> g_localFontFmt;  // live previews of fonts not in the catalog
-
-namespace FontLay {
-constexpr int Cols = 3;
-constexpr float PrevH = 64.f, NameH = 26.f, RowGap = 8.f, HeadH = 28.f;
-constexpr float RowH = PrevH + NameH + RowGap;
-constexpr float CardW = (Lay::BarW - 2 * Lay::GridPad - (Cols - 1) * Lay::CardGap) / Cols;
-constexpr float TopH = Lay::GridPad + Lay::GridHeaderH - 4;  // the fixed header above the cards
-}  // namespace FontLay
 
 // ---- names -------------------------------------------------------------------
 // "SF-Pro-Display-BlackItalic.otf" -> "SF Pro Display Black Italic": drop the extension, split
@@ -162,7 +147,7 @@ static bool IsFontFile(const std::wstring& name) {
 }
 
 // Looks at the Fonts folder: which catalog fonts are downloaded, and which fonts were put
-// there by hand (they get their own "On this PC" category).
+// there by hand (listed with the downloaded ones).
 static void ScanLocalFonts() {
     g_fontLocal.clear();
     g_fontCat.resize(g_fontCatN);
@@ -202,31 +187,8 @@ static std::wstring FontDisplayName(const std::wstring& file) {
     return CleanFontName(file);
 }
 
-// Cards in rows of three under a title for each category.
-static void LayoutFontCells() {
-    using namespace FontLay;
-    g_fontCells.clear();
-    g_fontHeaders.clear();
-    float y = 0;
-    int col = 0;
-    const std::wstring* cat = nullptr;
-    for (int k = 0; k < (int)g_fontList.size(); k++) {
-        const FontItem& it = g_fontCat[g_fontList[k]];
-        if (!cat || *cat != it.cat) {
-            if (col) { y += RowH; col = 0; }
-            g_fontHeaders.push_back({it.cat, y});
-            y += HeadH;
-            cat = &it.cat;
-        }
-        g_fontCells.push_back({g_fontList[k], Lay::Margin + Lay::GridPad + col * (CardW + Lay::CardGap), y});
-        if (++col == Cols) { col = 0; y += RowH; }
-    }
-    if (col) y += RowH;
-    g_fontContentH = g_fontList.empty() ? 44.f : y;
-    g_fontCellSel.assign(g_fontCells.size(), 0.f);
-}
-
-// "> font NAME": every word has to appear in the font's name or category.
+// "> font NAME": every word has to appear in the font's name or category. Fonts that are
+// already on this PC come first, under "Downloaded"; the rest keep their categories.
 static void BuildFontList(const std::wstring& filter) {
     g_fontFilter = filter;
     ScanLocalFonts();
@@ -237,52 +199,27 @@ static void BuildFontList(const std::wstring& filter) {
         if (b > a) words.push_back(filter.substr(a, b - a));
         a = b + 1;
     }
-    g_fontList.clear();
+    std::vector<int> local, rest;
     for (int i = 0; i < (int)g_fontCat.size(); i++) {
+        const FontItem& it = g_fontCat[i];
+        bool here = FontIsLocal(it);
         bool ok = true;
         for (auto& w : words)
-            if (g_fontCat[i].lower.find(w) == std::wstring::npos) { ok = false; break; }
-        if (ok) g_fontList.push_back(i);
+            if (it.lower.find(w) == std::wstring::npos && !(here && std::wstring(L"downloaded").find(w) == 0)) {
+                ok = false;
+                break;
+            }
+        if (ok) (here ? local : rest).push_back(i);
     }
-    LayoutFontCells();
+    g_fontList = local;
+    g_fontList.insert(g_fontList.end(), rest.begin(), rest.end());
+    std::vector<std::wstring> cats;
+    for (int i : g_fontList) cats.push_back(FontIsLocal(g_fontCat[i]) ? kLocalCat : g_fontCat[i].cat);
+    g_fontGrid.Layout(cats);
 }
 
-static float FontPanelH() {
-    return std::min(Lay::MaxPanelH, FontLay::TopH + g_fontContentH + 6.f);
-}
-static float FontViewH() { return FontPanelH() - FontLay::TopH; }
-static float FontMaxOff() { return std::max(0.f, g_fontContentH + 6.f - FontViewH()); }
-
-static void FontScrollTo(float off, bool instant) {
-    g_fontOffTarget = std::clamp(off, 0.f, FontMaxOff());
-    if (instant) g_fontOff = g_fontOffTarget;
-}
-
-// Keeps the selected card (and its category title when it's the first row) in view.
-static void FontEnsureVisible(int k, bool instant = false) {
-    if (k < 0 || k >= (int)g_fontCells.size()) return;
-    float y = g_fontCells[k].y, view = FontViewH();
-    float top = y - FontLay::HeadH - 4, bottom = y + FontLay::RowH;
-    if (top < g_fontOffTarget) FontScrollTo(top, instant);
-    else if (bottom > g_fontOffTarget + view) FontScrollTo(bottom - view, instant);
-}
-
-// Up / Down: the card in the next row nearest to this one's column.
-static int FontVertical(int k, int dir) {
-    if (k < 0 || k >= (int)g_fontCells.size()) return k;
-    float y = g_fontCells[k].y, x = g_fontCells[k].x;
-    int best = k;
-    float bestRowY = dir > 0 ? 1e9f : -1e9f, bestDx = 1e9f;
-    for (int i = 0; i < (int)g_fontCells.size(); i++) {
-        float cy = g_fontCells[i].y;
-        if (dir > 0 ? cy <= y + 1 : cy >= y - 1) continue;
-        bool closerRow = dir > 0 ? cy < bestRowY - 1 : cy > bestRowY + 1;
-        bool sameRow = std::fabs(cy - bestRowY) <= 1;
-        float dx = std::fabs(g_fontCells[i].x - x);
-        if (closerRow || (sameRow && dx < bestDx)) { best = i; bestRowY = cy; bestDx = dx; }
-    }
-    return best;
-}
+static float FontPanelH() { return g_fontGrid.PanelH(); }
+static void FontScrollTo(float off, bool instant) { g_fontGrid.ScrollTo(off, instant); }
 
 // ---- downloads ------------------------------------------------------------------
 // GET over HTTPS. With a path, the body goes to that file (via a temporary file, so a
@@ -615,9 +552,8 @@ static void DrawProgressRing(D2D1_POINT_2F c, float r, float p, D2D1_COLOR_F tra
 
 static void DrawFontGrid(float top, float dt, float alpha, double now) {
     using namespace Lay;
-    using FontLay::CardW;
-    using FontLay::PrevH;
-    using FontLay::NameH;
+    CardGrid& G = g_fontGrid;
+    const float CardW = G.CardW(), PrevH = G.prevH, NameH = G.nameH;
     const Theme& th = g_th;
     g_fontBtnHits.clear();
     g_fontDefaultHit = {};
@@ -640,18 +576,17 @@ static void DrawFontGrid(float top, float dt, float alpha, double now) {
                    GridHeaderH, WithA(th.dim, alpha * 0.85f));
     }
 
-    float cTop = top + FontLay::TopH, cBottom = top + g_panelH;
-    g_fontOff = Damp(g_fontOff, g_fontOffTarget, 18.f, dt);
-    if (std::fabs(g_fontOff - g_fontOffTarget) < 0.3f) g_fontOff = g_fontOffTarget;
+    float cTop = top + CardGrid::TopH, cBottom = top + g_panelH;
+    G.Animate(dt);
     g_rt->PushAxisAlignedClip(D2D1::RectF(Margin, cTop, Margin + BarW, cBottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
     if (g_fontList.empty())
         DrawLayout(L"No fonts match", g_fmtRow, Margin + GridPad + 2, cTop, 300, 40, WithA(th.dim, alpha));
 
-    for (auto& h : g_fontHeaders) {
-        float y = cTop + h.second - g_fontOff;
-        if (y > cBottom || y + FontLay::HeadH < cTop) continue;
-        DrawLayout(h.first, g_fmtHeader, Margin + GridPad + 2, y, 400, FontLay::HeadH - 2, WithA(th.dim, alpha * 0.9f));
+    for (auto& h : G.headers) {
+        float y = cTop + h.second - G.off;
+        if (y > cBottom || y + G.headH < cTop) continue;
+        DrawLayout(h.first, g_fmtHeader, Margin + GridPad + 2, y, 400, G.headH - 2, WithA(th.dim, alpha * 0.9f));
     }
 
     std::unordered_map<std::wstring, float> progress;
@@ -661,13 +596,14 @@ static void DrawFontGrid(float top, float dt, float alpha, double now) {
         progress = g_fontProgress;
         failed = g_fontFailed;
     }
-    for (int k = 0; k < (int)g_fontCells.size(); k++) {
-        const FontCell& c = g_fontCells[k];
-        float x = c.x, y = cTop + c.y - g_fontOff;
-        g_fontCellSel[k] = Damp(g_fontCellSel[k], k == g_sel ? 1.f : 0.f, 16.f, dt);
-        if (y > cBottom || y + FontLay::RowH < cTop) continue;
-        const FontItem& it = g_fontCat[c.item];
-        float sel = g_fontCellSel[k];
+    for (int k = 0; k < (int)G.cells.size(); k++) {
+        const GridCell& c = G.cells[k];
+        int item = g_fontList[c.item];
+        float x = c.x, y = cTop + c.y - G.off;
+        G.cellSel[k] = Damp(G.cellSel[k], k == g_sel ? 1.f : 0.f, 16.f, dt);
+        if (y > cBottom || y + G.RowH() < cTop) continue;
+        const FontItem& it = g_fontCat[item];
+        float sel = G.cellSel[k];
         float cardA = alpha * Clamp01(g_contentA * 1.3);
         D2D1_RECT_F card = D2D1::RectF(x, y, x + CardW, y + PrevH);
         D2D1_RECT_F hit = D2D1::RectF(x, std::max(y, cTop), x + CardW, std::min(y + PrevH + NameH, cBottom));
@@ -678,7 +614,7 @@ static void DrawFontGrid(float top, float dt, float alpha, double now) {
 
         // the picture: the font's own letters
         bool local = FontIsLocal(it);
-        if (c.item >= (int)g_fontCatN) {
+        if (item >= (int)g_fontCatN) {
             if (IDWriteTextFormat* f = LocalFontFormat(it.file)) {
                 g_rt->PushAxisAlignedClip(card, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 DrawLayout(kFontSample, f, x + 10, y + 2, CardW - 20, PrevH - 4, WithA(th.text, cardA));
@@ -735,14 +671,8 @@ static void DrawFontGrid(float top, float dt, float alpha, double now) {
 
     // scroll bar
     float view = cBottom - cTop;
-    if (g_fontContentH + 6 > view + 1) {
-        float trackH = view - 8, thumbH = std::max(24.f, trackH * view / (g_fontContentH + 6));
-        float t = FontMaxOff() > 0 ? g_fontOff / FontMaxOff() : 0;
-        float ty = cTop + 4 + (trackH - thumbH) * std::clamp(t, 0.f, 1.f);
-        g_solid->SetColor(WithA(th.dim, alpha * 0.45f));
-        g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(Margin + BarW - 6, ty, Margin + BarW - 3, ty + thumbH), 1.5f, 1.5f),
-                                   g_solid);
-    }
+    if (G.MaxOff() > 0.5f)
+        DrawScrollBar(cTop + 4, view - 8, G.off / G.MaxOff(), view / (G.contentH + 6), alpha, dt);
 }
 
 static int FontButtonAt(float x, float y) {
@@ -764,8 +694,8 @@ static void FontEnter() {
     g_sel = 0;
     for (int k = 0; k < (int)g_fontList.size(); k++)
         if (FontInUse(g_fontCat[g_fontList[k]])) g_sel = k;
-    g_fontOff = g_fontOffTarget = 0;
-    FontEnsureVisible(g_sel, true);
+    g_fontGrid.ScrollTo(0, true);
+    g_fontGrid.EnsureVisible(g_sel, true);
 }
 
 static void FontActivateSel() {
@@ -773,20 +703,10 @@ static void FontActivateSel() {
 }
 
 static bool FontKey(WPARAM vk, bool shift) {
-    int n = (int)g_fontList.size();
-    if (!n) return false;
-    int k = g_sel;
-    switch (vk) {
-    case VK_UP: k = FontVertical(g_sel, -1); break;
-    case VK_DOWN: k = FontVertical(g_sel, 1); break;
-    case VK_LEFT: if (shift) return false; k = g_sel - 1; break;
-    case VK_RIGHT: if (shift) return false; k = g_sel + 1; break;
-    case VK_PRIOR: for (int i = 0; i < 3; i++) k = FontVertical(k, -1); break;
-    case VK_NEXT: for (int i = 0; i < 3; i++) k = FontVertical(k, 1); break;
-    default: return false;
-    }
-    Select(std::clamp(k, 0, n - 1));
-    FontEnsureVisible(g_sel);
+    int k = g_fontGrid.Key(vk, shift, g_sel);
+    if (k < 0) return false;
+    Select(k);
+    g_fontGrid.EnsureVisible(g_sel, false);
     return true;
 }
 
@@ -807,7 +727,7 @@ static void FontClick(float x, float y) {
     }
 }
 
-static void FontWheel(int steps) { FontScrollTo(g_fontOffTarget + steps * 64.f, false); }
+static void FontWheel(int steps) { g_fontGrid.ScrollTo(g_fontGrid.offTarget + steps * 64.f, false); }
 
 static void FontHover(float x, float y) {
     g_fontBtnHot = g_mode == Mode::Fonts ? FontButtonAt(x, y) : -1;
@@ -828,12 +748,16 @@ static void FontDownloaded(const std::wstring& id, bool ok) {
     for (size_t i = 0; i < g_fontCatN; i++)
         if (g_fontCat[i].id == id) file = g_fontCat[i].file;
     if (ok && !file.empty()) ApplyFont(file);
+    // The new font moves up to "Downloaded"; the selection follows it there when it was on it.
     if (g_mode == Mode::Fonts) {
-        int sel = g_sel;
-        float off = g_fontOff, target = g_fontOffTarget;
+        int selItem = g_sel >= 0 && g_sel < (int)g_fontList.size() ? g_fontList[g_sel] : -1;
+        float off = g_fontGrid.off, target = g_fontGrid.offTarget;
         BuildFontList(g_fontFilter);
-        g_sel = std::clamp(sel, 0, std::max(0, (int)g_fontList.size() - 1));
-        g_fontOff = std::min(off, FontMaxOff());
-        g_fontOffTarget = std::min(target, FontMaxOff());
+        g_sel = 0;
+        for (int k = 0; k < (int)g_fontList.size(); k++)
+            if (g_fontList[k] == selItem) g_sel = k;
+        g_fontGrid.off = std::min(off, g_fontGrid.MaxOff());
+        g_fontGrid.ScrollTo(target, false);
+        g_fontGrid.EnsureVisible(g_sel, false);
     }
 }

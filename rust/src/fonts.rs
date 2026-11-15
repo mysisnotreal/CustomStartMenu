@@ -11,17 +11,9 @@ use windows::Win32::Networking::WinHttp::*;
 
 const PREVIEW_BASE: &str = "https://raw.githubusercontent.com/mysisnotreal/CustomStartMenu/main/fonts/previews/";
 const SAMPLE: &str = "The quick brown fox jumps over the lazy dog";
-const LOCAL_CAT: &str = "On this PC";
+const LOCAL_CAT: &str = "Downloaded"; // fonts in the Fonts folder are listed first, under this
 const CATALOG: &str = include_str!("../../fonts/catalog.tsv");
 
-const COLS: usize = 3;
-const PREV_H: f32 = 64.0;
-const NAME_H: f32 = 26.0;
-const ROW_GAP: f32 = 8.0;
-const HEAD_H: f32 = 28.0;
-const ROW_H_F: f32 = PREV_H + NAME_H + ROW_GAP;
-const CARD_W: f32 = (BAR_W - 2.0 * GRID_PAD - (COLS as f32 - 1.0) * CARD_GAP) / COLS as f32;
-const TOP_H: f32 = GRID_PAD + GRID_HEADER_H - 4.0; // the fixed header above the cards
 
 #[derive(Clone, Default)]
 pub struct FontItem {
@@ -41,12 +33,7 @@ pub struct FontUi {
     pub filter: String,
     pub list: Vec<usize>, // what the panel shows (indices into cat)
     pub local: HashSet<String>, // lower-case file names in the Fonts folder
-    pub cells: Vec<(usize, f32, f32)>, // item, x in bar space, y from the top of the scrolling area
-    pub headers: Vec<(String, f32)>,
-    pub cell_sel: Vec<f32>,
-    pub content_h: f32,
-    pub off: f32,
-    pub off_target: f32,
+    pub grid: grid::CardGrid, // cards in rows of three, by category (cell item = position in list)
     pub btn_hits: Vec<(D2D_RECT_F, i32)>,
     pub default_hit: Option<D2D_RECT_F>,
     pub btn_hot: i32,
@@ -175,7 +162,7 @@ fn is_font_file(n: &str) -> bool {
 }
 
 // Looks at the Fonts folder: which catalog fonts are downloaded, and which fonts were put
-// there by hand (they get their own "On this PC" category).
+// there by hand (listed with the downloaded ones).
 fn scan_local() {
     let f = fu();
     f.local.clear();
@@ -219,109 +206,38 @@ pub fn display_name(file: &str) -> String {
     fu().cat.iter().find(|i| i.file.eq_ignore_ascii_case(file)).map(|i| i.name.clone()).unwrap_or_else(|| clean_font_name(file))
 }
 
-// Cards in rows of three under a title for each category.
-fn layout_cells() {
-    let f = fu();
-    f.cells.clear();
-    f.headers.clear();
-    let mut y = 0.0;
-    let mut col = 0usize;
-    let mut cat: Option<String> = None;
-    for &i in &f.list {
-        let it = &f.cat[i];
-        if cat.as_deref() != Some(it.cat.as_str()) {
-            if col > 0 {
-                y += ROW_H_F;
-                col = 0;
-            }
-            f.headers.push((it.cat.clone(), y));
-            y += HEAD_H;
-            cat = Some(it.cat.clone());
-        }
-        f.cells.push((i, MARGIN + GRID_PAD + col as f32 * (CARD_W + CARD_GAP), y));
-        col += 1;
-        if col == COLS {
-            col = 0;
-            y += ROW_H_F;
-        }
-    }
-    if col > 0 {
-        y += ROW_H_F;
-    }
-    f.content_h = if f.list.is_empty() { 44.0 } else { y };
-    f.cell_sel = vec![0.0; f.cells.len()];
-}
-
-// "> font NAME": every word has to appear in the font's name or category.
+// "> font NAME": every word has to appear in the font's name or category. Fonts that are
+// already on this PC come first, under "Downloaded"; the rest keep their categories.
 pub fn build_list(filter: &str) {
     fu().filter = filter.to_string();
     scan_local();
     let f = fu();
     let words: Vec<&str> = filter.split(' ').filter(|w| !w.is_empty()).collect();
-    f.list = (0..f.cat.len()).filter(|&i| words.iter().all(|w| f.cat[i].lower.contains(w))).collect();
-    layout_cells();
+    let (mut local, mut rest) = (Vec::new(), Vec::new());
+    for i in 0..f.cat.len() {
+        let here = is_local(&f.cat[i]);
+        if words.iter().all(|w| f.cat[i].lower.contains(w) || (here && "downloaded".starts_with(w))) {
+            if here {
+                local.push(i);
+            } else {
+                rest.push(i);
+            }
+        }
+    }
+    local.extend(rest);
+    f.list = local;
+    let cats: Vec<String> = f.list.iter().map(|&i| if is_local(&f.cat[i]) { LOCAL_CAT.to_string() } else { f.cat[i].cat.clone() }).collect();
+    f.grid.layout(&cats);
 }
 
 pub fn count() -> i32 {
     fu().list.len() as i32
 }
 pub fn panel_h() -> f32 {
-    MAX_PANEL_H.min(TOP_H + fu().content_h + 6.0)
-}
-fn view_h() -> f32 {
-    panel_h() - TOP_H
-}
-fn max_off() -> f32 {
-    (fu().content_h + 6.0 - view_h()).max(0.0)
+    fu().grid.panel_h()
 }
 pub fn scroll_to(off: f32, instant: bool) {
-    let f = fu();
-    f.off_target = off.clamp(0.0, max_off());
-    if instant {
-        f.off = f.off_target;
-    }
-}
-
-// Keeps the selected card (and its category title when it's the first row) in view.
-fn ensure_visible(k: i32, instant: bool) {
-    let f = fu();
-    if k < 0 || k as usize >= f.cells.len() {
-        return;
-    }
-    let y = f.cells[k as usize].2;
-    let view = view_h();
-    let (top, bottom) = (y - HEAD_H - 4.0, y + ROW_H_F);
-    if top < f.off_target {
-        scroll_to(top, instant);
-    } else if bottom > f.off_target + view {
-        scroll_to(bottom - view, instant);
-    }
-}
-
-// Up / Down: the card in the next row nearest to this one's column.
-fn vertical(k: i32, dir: i32) -> i32 {
-    let f = fu();
-    if k < 0 || k as usize >= f.cells.len() {
-        return k;
-    }
-    let (_, x, y) = f.cells[k as usize];
-    let mut best = k;
-    let mut best_row = if dir > 0 { 1e9f32 } else { -1e9f32 };
-    let mut best_dx = 1e9f32;
-    for (i, &(_, cx, cy)) in f.cells.iter().enumerate() {
-        if if dir > 0 { cy <= y + 1.0 } else { cy >= y - 1.0 } {
-            continue;
-        }
-        let closer = if dir > 0 { cy < best_row - 1.0 } else { cy > best_row + 1.0 };
-        let same = (cy - best_row).abs() <= 1.0;
-        let dx = (cx - x).abs();
-        if closer || (same && dx < best_dx) {
-            best = i as i32;
-            best_row = cy;
-            best_dx = dx;
-        }
-    }
-    best
+    fu().grid.scroll_to(off, instant);
 }
 
 // ---- downloads -------------------------------------------------------------------
@@ -655,6 +571,8 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
     let s = st();
     let th = s.th;
     let f = fu();
+    let card_w = f.grid.card_w();
+    let (prev_h, name_h) = (f.grid.prev_h, f.grid.name_h);
     f.btn_hits.clear();
     f.default_hit = None;
     let cur = font_file();
@@ -675,23 +593,21 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
         draw_layout(&ws("↵ download / use"), &s.fmt_row_right, MARGIN + BAR_W - GRID_PAD - 260.0, top + GRID_PAD - 4.0, 258.0, GRID_HEADER_H, with_a(th.dim, alpha * 0.85));
     }
 
-    let c_top = top + TOP_H;
+    let c_top = top + grid::TOP_H;
     let c_bottom = top + s.panel_h;
-    f.off = damp(f.off, f.off_target, 18.0, dt);
-    if (f.off - f.off_target).abs() < 0.3 {
-        f.off = f.off_target;
-    }
+    f.grid.animate(dt);
     unsafe { rt().PushAxisAlignedClip(&rect(MARGIN, c_top, MARGIN + BAR_W, c_bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
 
     if f.list.is_empty() {
         draw_layout(&ws("No fonts match"), &s.fmt_row, MARGIN + GRID_PAD + 2.0, c_top, 300.0, 40.0, with_a(th.dim, alpha));
     }
-    for (text, hy) in &f.headers {
-        let y = c_top + hy - f.off;
-        if y > c_bottom || y + HEAD_H < c_top {
+    let head_h = f.grid.head_h;
+    for (text, hy) in &f.grid.headers {
+        let y = c_top + hy - f.grid.off;
+        if y > c_bottom || y + head_h < c_top {
             continue;
         }
-        draw_layout(&ws(text), &s.fmt_header, MARGIN + GRID_PAD + 2.0, y, 400.0, HEAD_H - 2.0, with_a(th.dim, alpha * 0.9));
+        draw_layout(&ws(text), &s.fmt_header, MARGIN + GRID_PAD + 2.0, y, 400.0, head_h - 2.0, with_a(th.dim, alpha * 0.9));
     }
 
     let (progress, failed) = {
@@ -699,18 +615,20 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
         (g.progress.clone(), g.failed.clone())
     };
     let sample = ws(SAMPLE);
-    for k in 0..f.cells.len() {
-        let (item, x, cy) = f.cells[k];
-        let y = c_top + cy - f.off;
-        f.cell_sel[k] = damp(f.cell_sel[k], if k as i32 == s.sel { 1.0 } else { 0.0 }, 16.0, dt);
-        if y > c_bottom || y + ROW_H_F < c_top {
+    let row_h = f.grid.row_h();
+    for k in 0..f.grid.cells.len() {
+        let (pos, x, cy) = f.grid.cells[k];
+        let item = f.list[pos];
+        let y = c_top + cy - f.grid.off;
+        f.grid.cell_sel[k] = damp(f.grid.cell_sel[k], if k as i32 == s.sel { 1.0 } else { 0.0 }, 16.0, dt);
+        if y > c_bottom || y + row_h < c_top {
             continue;
         }
         let it = f.cat[item].clone();
-        let sel = f.cell_sel[k];
+        let sel = f.grid.cell_sel[k];
         let card_a = alpha * clamp01(s.content_a as f64 * 1.3);
-        let card = rect(x, y, x + CARD_W, y + PREV_H);
-        let hit = rect(x, y.max(c_top), x + CARD_W, (y + PREV_H + NAME_H).min(c_bottom));
+        let card = rect(x, y, x + card_w, y + prev_h);
+        let hit = rect(x, y.max(c_top), x + card_w, (y + prev_h + name_h).min(c_bottom));
         if hit.bottom > hit.top {
             s.hits.push((hit, k as i32));
         }
@@ -721,7 +639,7 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
         if item >= f.cat_n {
             if let Some(fmt) = local_format(&it.file) {
                 unsafe { rt().PushAxisAlignedClip(&card, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-                draw_layout(&sample, &fmt, x + 10.0, y + 2.0, CARD_W - 20.0, PREV_H - 4.0, with_a(th.text, card_a));
+                draw_layout(&sample, &fmt, x + 10.0, y + 2.0, card_w - 20.0, prev_h - 4.0, with_a(th.text, card_a));
                 unsafe { rt().PopAxisAlignedClip() };
             }
         } else if let Some((bmp, shown, mask)) = get_preview(&it.id) {
@@ -741,19 +659,19 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
         } else {
             // loading: two soft lines where the text will be
             let pulse = 0.05 + 0.03 * ((t_now * 4.0 + k as f64 * 0.6).sin() as f32);
-            fill_rr(rect(x + 10.0, y + 18.0, x + CARD_W - 24.0, y + 28.0), 5.0, with_a(th.text, card_a * pulse));
-            fill_rr(rect(x + 10.0, y + 36.0, x + CARD_W * 0.6, y + 46.0), 5.0, with_a(th.text, card_a * pulse));
+            fill_rr(rect(x + 10.0, y + 18.0, x + card_w - 24.0, y + 28.0), 5.0, with_a(th.text, card_a * pulse));
+            fill_rr(rect(x + 10.0, y + 36.0, x + card_w * 0.6, y + 46.0), 5.0, with_a(th.text, card_a * pulse));
         }
 
         if sel > 0.01 {
             set_color(with_a(th.accent, card_a * sel));
             unsafe {
-                rt().DrawRoundedRectangle(&rrect(rect(x - 2.0, y - 2.0, x + CARD_W + 2.0, y + PREV_H + 2.0), 11.0), solid(), 2.0, None::<&ID2D1StrokeStyle>)
+                rt().DrawRoundedRectangle(&rrect(rect(x - 2.0, y - 2.0, x + card_w + 2.0, y + prev_h + 2.0), 11.0), solid(), 2.0, None::<&ID2D1StrokeStyle>)
             };
         }
 
         // top-right corner: in use, downloading, or the Download button
-        let bc = pt(x + CARD_W - 15.0, y + 15.0);
+        let bc = pt(x + card_w - 15.0, y + 15.0);
         let using = in_use(&it);
         if using {
             set_color(with_a(th.accent, card_a));
@@ -775,18 +693,15 @@ pub fn draw_grid(top: f32, dt: f32, alpha: f32, t_now: f64) {
         }
 
         let nc = lerp_c(th.dim, th.text, sel.max(if using { 1.0 } else { 0.0 }));
-        draw_layout(&ws(&it.name), &s.fmt_card, x + 4.0, y + PREV_H + 2.0, CARD_W - 8.0, NAME_H - 4.0, with_a(nc, card_a));
+        draw_layout(&ws(&it.name), &s.fmt_card, x + 4.0, y + prev_h + 2.0, card_w - 8.0, name_h - 4.0, with_a(nc, card_a));
     }
     unsafe { rt().PopAxisAlignedClip() };
 
     // scroll bar
     let view = c_bottom - c_top;
-    if f.content_h + 6.0 > view + 1.0 {
-        let track_h = view - 8.0;
-        let thumb_h = (track_h * view / (f.content_h + 6.0)).max(24.0);
-        let t = if max_off() > 0.0 { f.off / max_off() } else { 0.0 };
-        let ty = c_top + 4.0 + (track_h - thumb_h) * t.clamp(0.0, 1.0);
-        fill_rr(rect(MARGIN + BAR_W - 6.0, ty, MARGIN + BAR_W - 3.0, ty + thumb_h), 1.5, with_a(th.dim, alpha * 0.45));
+    let max_off = f.grid.max_off();
+    if max_off > 0.5 {
+        grid::draw_scroll_bar(c_top + 4.0, view - 8.0, f.grid.off / max_off, view / (f.grid.content_h + 6.0), alpha, dt);
     }
 }
 
@@ -809,9 +724,8 @@ pub fn enter() {
             s.sel = k as i32;
         }
     }
-    f.off = 0.0;
-    f.off_target = 0.0;
-    ensure_visible(s.sel, true);
+    f.grid.scroll_to(0.0, true);
+    f.grid.ensure_visible(s.sel, true);
 }
 
 pub fn activate_sel() {
@@ -822,22 +736,9 @@ pub fn activate_sel() {
 }
 
 pub fn on_key(vk: VIRTUAL_KEY, shift: bool) -> bool {
-    let n = fu().list.len() as i32;
-    if n == 0 {
-        return false;
-    }
-    let sel = st().sel;
-    let k = match vk {
-        VK_UP => vertical(sel, -1),
-        VK_DOWN => vertical(sel, 1),
-        VK_LEFT if !shift => sel - 1,
-        VK_RIGHT if !shift => sel + 1,
-        VK_PRIOR => (0..3).fold(sel, |k, _| vertical(k, -1)),
-        VK_NEXT => (0..3).fold(sel, |k, _| vertical(k, 1)),
-        _ => return false,
-    };
-    select(k.clamp(0, n - 1));
-    ensure_visible(st().sel, false);
+    let Some(k) = fu().grid.key(vk, shift, st().sel) else { return false };
+    select(k);
+    fu().grid.ensure_visible(st().sel, false);
     true
 }
 
@@ -866,7 +767,8 @@ pub fn click(x: f32, y: f32) {
 }
 
 pub fn wheel(steps: i32) {
-    scroll_to(fu().off_target + steps as f32 * 64.0, false);
+    let g = &mut fu().grid;
+    g.scroll_to(g.off_target + steps as f32 * 64.0, false);
 }
 
 pub fn hover(x: f32, y: f32) {
@@ -878,7 +780,7 @@ pub fn hand_at(x: f32, y: f32) -> bool {
     st().mode == Mode::Fonts && (button_at(x, y) >= 0 || default_at(x, y))
 }
 
-// A download finished: use the font, and refresh the cards (keeping the scroll position).
+// A download finished: use the font, and refresh the cards.
 pub fn downloaded(id: &str, ok: bool) {
     {
         let mut g = SHARED.lock().unwrap();
@@ -891,13 +793,17 @@ pub fn downloaded(id: &str, ok: bool) {
     if let (true, Some(file)) = (ok, file) {
         apply_font(&file);
     }
+    // The new font moves up to "Downloaded"; the selection follows it there when it was on it.
     if st().mode == Mode::Fonts {
         let sel = st().sel;
-        let (off, target) = (fu().off, fu().off_target);
+        let sel_item = if sel >= 0 { fu().list.get(sel as usize).copied() } else { None };
+        let (off, target) = (fu().grid.off, fu().grid.off_target);
         let filter = fu().filter.clone();
         build_list(&filter);
-        st().sel = sel.clamp(0, (fu().list.len() as i32 - 1).max(0));
-        fu().off = off.min(max_off());
-        fu().off_target = target.min(max_off());
+        st().sel = fu().list.iter().position(|&i| Some(i) == sel_item).unwrap_or(0) as i32;
+        let g = &mut fu().grid;
+        g.off = off.min(g.max_off());
+        g.scroll_to(target, false);
+        g.ensure_visible(st().sel, false);
     }
 }

@@ -45,7 +45,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+mod caret;
 mod fonts;
+mod grid;
 mod games;
 mod pins;
 use games::{refresh_games, GAMES, GAMES_LOADING};
@@ -219,10 +221,11 @@ struct CmdDef {
     title: &'static str,
     glyph: &'static str, // Segoe Fluent Icons / MDL2
 }
-const CMDS: [CmdDef; 8] = [
+const CMDS: [CmdDef; 9] = [
     CmdDef { key: "games", title: "Games", glyph: "\u{E7FC}" },
     CmdDef { key: "pins", title: "Pinned apps", glyph: "\u{E718}" },
     CmdDef { key: "theme", title: "Theme", glyph: "\u{E790}" },
+    CmdDef { key: "caret", title: "Caret", glyph: "\u{E70F}" },
     CmdDef { key: "font", title: "Font", glyph: "\u{E8D2}" },
     CmdDef { key: "fontfolder", title: "Open font folder", glyph: "\u{E838}" },
     CmdDef { key: "expanded", title: "Expanded results", glyph: "\u{E8FD}" },
@@ -232,11 +235,12 @@ const CMDS: [CmdDef; 8] = [
 const CMD_GAMES: usize = 0;
 const CMD_PINS: usize = 1;
 const CMD_THEME: usize = 2;
-const CMD_FONT: usize = 3;
-const CMD_FONTFOLDER: usize = 4;
-const CMD_EXPANDED: usize = 5;
-const CMD_STARTUP: usize = 6;
-const CMD_QUIT: usize = 7;
+const CMD_CARET: usize = 3;
+const CMD_FONT: usize = 4;
+const CMD_FONTFOLDER: usize = 5;
+const CMD_EXPANDED: usize = 6;
+const CMD_STARTUP: usize = 7;
+const CMD_QUIT: usize = 8;
 
 const CLASS_NAME: PCWSTR = w!("CustomStartMenu.CommandBar");
 // Placeholder in the language chosen in Setup (HKCU\Software\CustomStartMenu\Language).
@@ -286,6 +290,7 @@ enum Mode {
     Games,
     Pins,
     Fonts,
+    Caret,
 }
 fn is_app_list(m: Mode) -> bool {
     matches!(m, Mode::Results | Mode::Games | Mode::Pins)
@@ -683,6 +688,8 @@ struct State {
     prev_fg: HWND,
 
     fonts: fonts::FontUi, // "> font"
+    cfx: caret::CaretUi,  // "> caret"
+    sb: grid::ScrollBar,  // the panel's scroll bar
 }
 
 static mut ST: *mut State = null_mut();
@@ -1074,6 +1081,7 @@ fn command_detail(c: usize) -> String {
             }
         }
         CMD_FONT => fonts::display_name(&fonts::font_file()),
+        CMD_CARET => caret::summary(),
         _ => command_detail_str(c).to_string(),
     }
 }
@@ -1145,6 +1153,9 @@ fn update_state() {
             s.mode = Mode::Fonts;
             let skip = if word("fonts") { 5 } else { 4 };
             fonts::build_list(&String::from_utf16_lossy(&trim(&q[skip.min(q.len())..])));
+        } else if word("caret") {
+            s.mode = Mode::Caret;
+            caret::build_list(&String::from_utf16_lossy(&trim(&q[5.min(q.len())..])));
         } else if word("games") || word("game") {
             s.mode = Mode::Games;
             let skip = if word("games") { 5 } else { 4 };
@@ -1200,6 +1211,9 @@ fn update_state() {
         if s.mode == Mode::Fonts {
             fonts::enter();
         }
+        if s.mode == Mode::Caret {
+            caret::enter();
+        }
         if s.mode != Mode::None {
             s.content_a = if old == Mode::None { 0.0 } else { s.content_a.min(0.35) };
             s.draw_mode = s.mode;
@@ -1213,6 +1227,8 @@ fn update_state() {
     } else if s.mode == Mode::Fonts {
         s.sel = 0;
         fonts::scroll_to(0.0, true);
+    } else if s.mode == Mode::Caret {
+        caret::enter();
     }
     recompute_ghost();
 
@@ -1233,6 +1249,7 @@ fn item_count() -> i32 {
         Mode::Commands => s.cmd_list.len() as i32,
         Mode::Themes => THEME_COUNT as i32,
         Mode::Fonts => fonts::count(),
+        Mode::Caret => caret::count(),
         Mode::None => 0,
     }
 }
@@ -1257,6 +1274,7 @@ fn panel_target_h() -> f32 {
         }
         Mode::Themes => theme_grid_height(),
         Mode::Fonts => fonts::panel_h(),
+        Mode::Caret => caret::panel_h(),
         Mode::None => 0.0,
     }
 }
@@ -2388,22 +2406,16 @@ fn draw_text_area(t_now: f64, dt: f32) {
         set_color(th.text);
         rt().DrawTextLayout(pt(tx, MARGIN), &lay, solid(), D2D1_DRAW_TEXT_OPTIONS_NONE);
 
-        // Caret: smooth glide + soft trailing smear + eased blink + small "pop" on input.
+        rt().PopAxisAlignedClip();
+
+        // Caret: smooth glide + eased blink + small "pop" on input; its color, glow and effects
+        // are in caret.rs.
         let idle = t_now - s.last_input;
         let blink = if idle < 0.5 { 1.0 } else { (0.5 + 0.5 * ((idle - 0.5) * 2.0 * std::f64::consts::PI / 1.05).cos()) as f32 };
         let intro = clamp01((t_now - s.show_time - 0.10) / 0.22);
         let op = blink * ease_out_cubic(intro as f64) as f32;
         let h = CARET_H * (1.0 + 0.14 * (-idle * 16.0).exp() as f32);
-        if op > 0.003 {
-            let x0 = tx + s.caret_x.min(s.trail_x) - CARET_W / 2.0;
-            let x1 = tx + s.caret_x.max(s.trail_x) + CARET_W / 2.0;
-            if x1 - x0 > CARET_W + 0.6 {
-                fill_rr(rect(x0, cy - h * 0.38, x1, cy + h * 0.38), 1.0, with_a(th.accent, op * 0.28));
-            }
-            fill_rr(rect(tx + s.caret_x - CARET_W / 2.0, cy - h / 2.0, tx + s.caret_x + CARET_W / 2.0, cy + h / 2.0), 1.0, with_a(th.accent, op));
-        }
-
-        rt().PopAxisAlignedClip();
+        caret::draw_caret_and_fx(&lay, full.len(), tx, cy, op, h, t_now);
     }
 }
 
@@ -2447,9 +2459,12 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
         s.list_top = sel - mr + 1;
     }
     s.list_top = s.list_top.clamp(0, (n - mr).max(0));
-    s.list_off = damp(s.list_off, s.list_top as f32, 22.0, dt);
-    if (s.list_off - s.list_top as f32).abs() < 0.002 {
-        s.list_off = s.list_top as f32;
+    if !s.sb.drag {
+        // while the scroll bar is dragged the list follows the mouse exactly
+        s.list_off = damp(s.list_off, s.list_top as f32, 22.0, dt);
+        if (s.list_off - s.list_top as f32).abs() < 0.002 {
+            s.list_off = s.list_top as f32;
+        }
     }
     if !s.sel_y_init {
         s.sel_row = sel as f32;
@@ -2578,10 +2593,7 @@ fn draw_rows(top: f32, dt: f32, alpha: f32) {
 
     // scroll bar when the list is longer than the panel
     if n > mr {
-        let track_h = mr as f32 * ROW_H - 8.0;
-        let thumb_h = (track_h * mr as f32 / n as f32).max(24.0);
-        let ty = top + PANEL_PAD + 4.0 + (track_h - thumb_h) * (s.list_off / (n - mr) as f32);
-        fill_rr(rect(MARGIN + BAR_W - 6.0, ty, MARGIN + BAR_W - 3.0, ty + thumb_h), 1.5, with_a(th.dim, alpha * 0.45));
+        grid::draw_scroll_bar(top + PANEL_PAD + 4.0, mr as f32 * ROW_H - 8.0, s.list_off / (n - mr) as f32, mr as f32 / n as f32, alpha, dt);
     }
 }
 
@@ -2693,6 +2705,8 @@ fn draw_panel(t_now: f64, dt: f32) {
         draw_theme_grid(top, dt, alpha, t_now);
     } else if s.draw_mode == Mode::Fonts {
         fonts::draw_grid(top, dt, alpha, t_now);
+    } else if s.draw_mode == Mode::Caret {
+        caret::draw_grid(top, dt, alpha, t_now);
     } else {
         draw_rows(top, dt, alpha);
     }
@@ -2917,6 +2931,7 @@ fn render() {
         s.draw_mode = Mode::None;
     }
     s.hits.clear();
+    s.sb.shown = false; // drawn again below when the panel has one
 
     build_shadow(&mut s.bar_shadow);
     build_shadow(&mut s.tile_shadow);
@@ -3147,6 +3162,9 @@ fn hide() {
     }
     s.dragging = false;
     s.press_pin = -1;
+    s.sb.drag = false;
+    s.sb.hot = false;
+    caret::clear_fx();
     close_menu();
 }
 
@@ -3284,6 +3302,7 @@ fn run_command(cmd: usize) {
         CMD_GAMES => set_text(&ws("> games ")),
         CMD_PINS => set_text(&ws("> pins")),
         CMD_THEME => set_text(&ws("> theme")),
+        CMD_CARET => set_text(&ws("> caret")),
         CMD_FONT => set_text(&ws("> font ")),
         CMD_FONTFOLDER => fonts::open_folder(),
         CMD_EXPANDED => {
@@ -3305,6 +3324,7 @@ fn activate(force_raw: bool, admin: bool) {
     match s.mode {
         Mode::Themes => apply_theme(s.sel.max(0) as usize),
         Mode::Fonts => fonts::activate_sel(),
+        Mode::Caret => caret::apply_sel(),
         Mode::Commands => {
             if s.sel >= 0 && (s.sel as usize) < s.cmd_list.len() {
                 run_command(s.cmd_list[s.sel as usize]);
@@ -3545,6 +3565,9 @@ fn set_text(t: &[u16]) {
 fn delete_range(a: usize, b: usize) {
     let s = st();
     let (a, b) = if a > b { (b, a) } else { (a, b) };
+    if b > a {
+        caret::deleted(a, b - a);
+    }
     s.text.drain(a..b);
     s.birth.drain(a..b);
     s.caret = a;
@@ -3562,6 +3585,9 @@ fn insert_text(t: &[u16]) {
     let s = st();
     let tm = now();
     let at = s.caret;
+    if !t.is_empty() {
+        caret::typed(at, t.len());
+    }
     s.text.splice(at..at, t.iter().copied());
     s.birth.splice(at..at, std::iter::repeat(tm).take(t.len()));
     s.caret += t.len();
@@ -3723,6 +3749,9 @@ fn on_key(vk: u16) {
     if s.mode == Mode::Fonts && fonts::on_key(VIRTUAL_KEY(vk), shift) {
         return;
     }
+    if s.mode == Mode::Caret && caret::on_key(VIRTUAL_KEY(vk), shift) {
+        return;
+    }
     match VIRTUAL_KEY(vk) {
         VK_ESCAPE => dismiss(),
         VK_APPS => {
@@ -3857,6 +3886,26 @@ fn pin_at(x: f32, y: f32) -> i32 {
         }
     }
     -1
+}
+
+// Dragging the panel's scroll bar: y is the mouse (bar space).
+fn scroll_bar_drag_to(y: f32) {
+    let s = st();
+    let f = grid::frac(y);
+    if s.mode == Mode::Fonts {
+        let g = &mut s.fonts.grid;
+        g.scroll_to(f * g.max_off(), true);
+    } else if s.mode == Mode::Caret {
+        let g = &mut s.cfx.grid;
+        g.scroll_to(f * g.max_off(), true);
+    } else if is_app_list(s.mode) || s.mode == Mode::Commands {
+        let n = item_count();
+        let room = (n - MAX_ROWS as i32).max(0);
+        s.list_off = f * room as f32;
+        s.list_top = (s.list_off.round() as i32).clamp(0, room);
+        s.sel = s.sel.clamp(s.list_top, (n - 1).min(s.list_top + MAX_ROWS as i32 - 1).max(s.list_top));
+        recompute_ghost();
+    }
 }
 
 fn hit_item_at(x: f32, y: f32) -> i32 {
@@ -4136,8 +4185,20 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 return LRESULT(0);
             }
             if y > MARGIN + BAR_H {
+                if grid::hit(x, y) {
+                    // grab the thumb, or jump to where the track was clicked
+                    s.sb.drag = true;
+                    s.sb.grab = if grid::on_thumb(y) { y - s.sb.thumb_y } else { s.sb.thumb_h / 2.0 };
+                    SetCapture(h);
+                    scroll_bar_drag_to(y);
+                    return LRESULT(0);
+                }
                 if s.mode == Mode::Fonts {
                     fonts::click(x, y);
+                    return LRESULT(0);
+                }
+                if s.mode == Mode::Caret {
+                    caret::click(x, y);
                     return LRESULT(0);
                 }
                 let idx = hit_item_at(x, y);
@@ -4196,6 +4257,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
             } else if s.mode == Mode::Fonts {
                 fonts::wheel(steps);
+            } else if s.mode == Mode::Caret {
+                caret::wheel(steps);
             } else if is_app_list(s.mode) || s.mode == Mode::Commands {
                 let n = item_count();
                 let mr = MAX_ROWS as i32;
@@ -4255,6 +4318,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 }
                 return LRESULT(0);
             }
+            if s.sb.drag {
+                scroll_bar_drag_to(y);
+                return LRESULT(0);
+            }
             if (wp.0 & 0x0001) != 0 && GetCapture() == h {
                 move_caret(hit_text_index(x), true);
                 return LRESULT(0);
@@ -4268,7 +4335,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             s.hover_pin = pin_at(x, y);
             fonts::hover(x, y);
-            let idx = hit_item_at(x, y);
+            s.sb.hot = grid::hit(x, y);
+            let idx = if s.sb.hot { -1 } else { hit_item_at(x, y) };
             if idx >= 0 {
                 select(idx);
             }
@@ -4283,8 +4351,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             s.hover_pin = -1;
             s.fonts.btn_hot = -1;
             s.fonts.default_hot = false;
+            s.sb.hot = false;
         }
         WM_LBUTTONUP => {
+            st().sb.drag = false;
             if GetCapture() == h {
                 let _ = ReleaseCapture();
             }
@@ -4318,6 +4388,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 SetCursor(cur);
             }
             return LRESULT(1);
+        }
+        WM_CAPTURECHANGED => {
+            st().sb.drag = false;
+            return DefWindowProcW(h, msg, wp, lp);
         }
         WM_DPICHANGED => {} // sizing is handled when the bar is shown
         WM_CLOSE => hide(),
@@ -4483,7 +4557,9 @@ fn main() {
             menu_hl: 0.0,
             menu_hl_init: false,
             prev_fg: HWND::default(),
-            fonts: fonts::FontUi { btn_hot: -1, ..Default::default() },
+            fonts: fonts::FontUi { btn_hot: -1, grid: grid::CardGrid::new(3, 64.0, 26.0), ..Default::default() },
+            cfx: caret::CaretUi::default(),
+            sb: grid::ScrollBar::default(),
         });
         ST = Box::into_raw(state);
         *ICONS.lock().unwrap() = Some(IconCache { queue: VecDeque::new(), map: HashMap::new(), quit: false });
@@ -4537,6 +4613,7 @@ fn main() {
         let uia_thread = std::thread::spawn(start_button_thread);
         let icon_thread = std::thread::spawn(icon_worker);
         fonts::load_catalog();
+        caret::load_settings();
         fonts::start_workers();
         refresh_apps(true);
         if !load_pins() {

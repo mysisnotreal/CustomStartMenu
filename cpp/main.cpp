@@ -187,6 +187,7 @@ static const CmdDef kCmds[] = {
     {L"games", L"Games", L""},
     {L"pins", L"Pinned apps", L""},
     {L"theme", L"Theme", L""},
+    {L"caret", L"Caret", L"\xE70F"},
     {L"font", L"Font", L"\xE8D2"},
     {L"fontfolder", L"Open font folder", L"\xE838"},
     {L"expanded", L"Expanded results", L""},
@@ -194,7 +195,7 @@ static const CmdDef kCmds[] = {
     {L"quit", L"Quit Custom Start", L""},
 };
 constexpr int kCmdCount = (int)(sizeof(kCmds) / sizeof(kCmds[0]));
-enum { CMD_GAMES, CMD_PINS, CMD_THEME, CMD_FONT, CMD_FONTFOLDER, CMD_EXPANDED, CMD_STARTUP, CMD_QUIT };
+enum { CMD_GAMES, CMD_PINS, CMD_THEME, CMD_CARET, CMD_FONT, CMD_FONTFOLDER, CMD_EXPANDED, CMD_STARTUP, CMD_QUIT };
 
 static const wchar_t* kClassName = L"CustomStartMenu.CommandBar";
 // Placeholder in the language chosen in Setup (HKCU\Software\CustomStartMenu\Language).
@@ -230,7 +231,7 @@ constexpr int kBackdropScale = 4;                   // backdrop is blurred at 1/
 enum { ID_OPEN = 1, ID_AUTOSTART, ID_INTERCEPT, ID_EXPANDED, ID_EXIT, ID_THEME0 = 100 };
 
 // Results, Games and Pins are all lists of apps (g_results).
-enum class Mode { None, Results, Commands, Themes, Games, Pins, Fonts };
+enum class Mode { None, Results, Commands, Themes, Games, Pins, Fonts, Caret };
 static bool IsAppList(Mode m) { return m == Mode::Results || m == Mode::Games || m == Mode::Pins; }
 
 template <class T>
@@ -567,6 +568,16 @@ static void FontActivateSel();
 static void OpenFontFolder();
 static std::wstring FontDisplayName(const std::wstring& file);
 static void ReleaseFontBitmaps();
+static void BuildCaretList(const std::wstring& filter);
+static void CaretEnter();
+static int CaretCount();
+static float CaretPanelH();
+static void CaretApplySel();
+static std::wstring CaretSummary();
+static void CaretTyped(int index, int count);
+static void CaretDeleted(int index, int count);
+static void ClearCaretFx();
+static void DrawCaretAndFx(IDWriteTextLayout* lay, int fullLen, float tx, float cy, float op, float h, double now);
 static void Hide();
 static int HitItemAt(float x, float y);
 
@@ -1350,6 +1361,7 @@ static std::wstring CommandDetail(int c) {
         return hidden ? std::to_wstring(hidden) + L" hidden" : std::to_wstring(g_pins.size());
     }
     case CMD_THEME: return kThemes[g_themeIdx].name;
+    case CMD_CARET: return CaretSummary();
     case CMD_FONT: return FontDisplayName(g_fontFile);
     case CMD_EXPANDED: return g_expanded ? L"On" : L"Off";
     case CMD_STARTUP: return g_autostart ? L"On" : L"Off";
@@ -1391,6 +1403,9 @@ static void UpdateState() {
         } else if (word(L"font") || word(L"fonts")) {
             g_mode = Mode::Fonts;
             BuildFontList(Trim(q.substr(word(L"fonts") ? 5 : 4)));
+        } else if (word(L"caret")) {
+            g_mode = Mode::Caret;
+            BuildCaretList(Trim(q.substr(5)));
         } else if (word(L"games") || word(L"game")) {
             g_mode = Mode::Games;
             std::wstring f = Trim(q.substr(q.find(L"game") + (word(L"games") ? 5 : 4)));
@@ -1442,6 +1457,7 @@ static void UpdateState() {
         if (old == Mode::Themes) SetPreview(g_themeIdx);  // leaving without applying reverts the preview
         g_sel = (g_mode == Mode::Themes) ? g_themeIdx : 0;
         if (g_mode == Mode::Fonts) FontEnter();
+        if (g_mode == Mode::Caret) CaretEnter();
         if (g_mode != Mode::None) {
             if (old == Mode::None) g_contentA = 0;
             else g_contentA = std::min(g_contentA, 0.35f);
@@ -1456,6 +1472,8 @@ static void UpdateState() {
     } else if (g_mode == Mode::Fonts) {
         g_sel = 0;
         FontScrollTo(0, true);
+    } else if (g_mode == Mode::Caret) {
+        CaretEnter();
     }
     RecomputeGhost();
 
@@ -1472,6 +1490,7 @@ static int ItemCount() {
     case Mode::Commands: return (int)g_cmdList.size();
     case Mode::Themes: return kThemeCount;
     case Mode::Fonts: return FontCount();
+    case Mode::Caret: return CaretCount();
     default: return 0;
     }
 }
@@ -1492,6 +1511,7 @@ static float PanelTargetH() {
     case Mode::Commands: return g_cmdList.empty() ? 0.f : PanelPad * 2 + RowH * g_cmdList.size();
     case Mode::Themes: return ThemeGridHeight();
     case Mode::Fonts: return FontPanelH();
+    case Mode::Caret: return CaretPanelH();
     default: return 0.f;
     }
 }
@@ -2352,28 +2372,17 @@ static void DrawTextArea(double now, float dt) {
     g_solid->SetColor(th.text);
     g_rt->DrawTextLayout({tx, Margin}, lay, g_solid);
 
-    // Caret: smooth glide + soft trailing smear + eased blink + small "pop" on input.
+    g_rt->PopAxisAlignedClip();
+
+    // Caret: smooth glide + eased blink + small "pop" on input; its color, glow and effects
+    // are in caret.inl.
     double idle = now - g_lastInput;
     float blink = idle < 0.5 ? 1.f : (float)(0.5 + 0.5 * std::cos((idle - 0.5) * 2 * 3.14159265 / 1.05));
     float intro = Clamp01((now - g_showTime - 0.10) / 0.22);
     float op = blink * (float)EaseOutCubic(intro);
     float h = CaretH * (1.f + 0.14f * (float)std::exp(-idle * 16.0));
-    if (op > 0.003f) {
-        float x0 = tx + std::min(g_caretX, g_trailX) - CaretW / 2;
-        float x1 = tx + std::max(g_caretX, g_trailX) + CaretW / 2;
-        if (x1 - x0 > CaretW + 0.6f) {
-            g_solid->SetColor(WithA(th.accent, op * 0.28f));
-            g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0, cy - h * 0.38f, x1, cy + h * 0.38f), 1, 1),
-                                       g_solid);
-        }
-        g_solid->SetColor(WithA(th.accent, op));
-        g_rt->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(tx + g_caretX - CaretW / 2, cy - h / 2, tx + g_caretX + CaretW / 2, cy + h / 2),
-                              1, 1),
-            g_solid);
-    }
+    DrawCaretAndFx(lay, (int)full.size(), tx, cy, op, h, now);
 
-    g_rt->PopAxisAlignedClip();
     lay->Release();
     for (auto* b : temp) b->Release();
 }
@@ -2387,6 +2396,8 @@ static void DrawLayout(const std::wstring& s, IDWriteTextFormat* fmt, float x, f
     if (keep) *keep = l;
     else l->Release();
 }
+
+#include "grid.inl"
 
 // List rows (results / commands) with a sliding selection highlight.
 static void DrawRows(float top, float dt, float alpha) {
@@ -2412,8 +2423,10 @@ static void DrawRows(float top, float dt, float alpha) {
     if (sel < g_listTop) g_listTop = sel;
     if (sel >= g_listTop + MaxRows) g_listTop = sel - MaxRows + 1;
     g_listTop = std::clamp(g_listTop, 0, std::max(0, n - MaxRows));
-    g_listOff = Damp(g_listOff, (float)g_listTop, 22.f, dt);
-    if (std::fabs(g_listOff - g_listTop) < 0.002f) g_listOff = (float)g_listTop;
+    if (!g_sbDrag) {  // while the scroll bar is dragged the list follows the mouse exactly
+        g_listOff = Damp(g_listOff, (float)g_listTop, 22.f, dt);
+        if (std::fabs(g_listOff - g_listTop) < 0.002f) g_listOff = (float)g_listTop;
+    }
     if (!g_selYInit) { g_selRow = (float)sel; g_selYInit = true; }
     g_selRow = Damp(g_selRow, (float)sel, 26.f, dt);
     g_selY = top + PanelPad + (g_selRow - g_listOff) * RowH;
@@ -2492,13 +2505,8 @@ static void DrawRows(float top, float dt, float alpha) {
     }
 
     // scroll bar when the list is longer than the panel
-    if (n > MaxRows) {
-        float trackH = MaxRows * RowH - 8, thumbH = std::max(24.f, trackH * MaxRows / n);
-        float ty = top + PanelPad + 4 + (trackH - thumbH) * (g_listOff / (n - MaxRows));
-        g_solid->SetColor(WithA(th.dim, alpha * 0.45f));
-        g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(Margin + BarW - 6, ty, Margin + BarW - 3, ty + thumbH), 1.5f, 1.5f),
-                                   g_solid);
-    }
+    if (n > MaxRows)
+        DrawScrollBar(top + PanelPad + 4, MaxRows * RowH - 8, g_listOff / (n - MaxRows), (float)MaxRows / n, alpha, dt);
 }
 
 // Theme picker: a grid of live preview cards.
@@ -2586,6 +2594,7 @@ static void DrawThemeGrid(float top, float dt, float alpha, double now) {
 }
 
 #include "fonts.inl"
+#include "caret.inl"
 
 static void DrawPanel(double now, float dt) {
     using namespace Lay;
@@ -2602,6 +2611,7 @@ static void DrawPanel(double now, float dt) {
                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     if (g_drawMode == Mode::Themes) DrawThemeGrid(top, dt, alpha, now);
     else if (g_drawMode == Mode::Fonts) DrawFontGrid(top, dt, alpha, now);
+    else if (g_drawMode == Mode::Caret) DrawCaretGrid(top, dt, alpha, now);
     else DrawRows(top, dt, alpha);
     g_rt->PopAxisAlignedClip();
 }
@@ -2769,6 +2779,7 @@ static void Render() {
     if (g_mode != Mode::None) g_contentA = Damp(g_contentA, 1.f, 12.f, dt);
     else if (g_panelH < 0.5f) g_drawMode = Mode::None;
     g_hits.clear();
+    g_sb.shown = false;  // drawn again below when the panel has one
 
     BuildShadow(g_barShadow);
     BuildShadow(g_tileShadow);
@@ -2936,6 +2947,8 @@ static void Hide() {
     if (g_dragging) SavePins();
     g_dragging = false;
     g_pressPin = -1;
+    g_sbDrag = g_sbHot = false;
+    ClearCaretFx();
     CloseMenu();
 }
 
@@ -3041,6 +3054,7 @@ static void RunCommand(int c) {
     case CMD_GAMES: SetText(L"> games "); break;
     case CMD_PINS: SetText(L"> pins"); break;
     case CMD_THEME: SetText(L"> theme"); break;
+    case CMD_CARET: SetText(L"> caret"); break;
     case CMD_FONT: SetText(L"> font "); break;
     case CMD_FONTFOLDER: OpenFontFolder(); break;
     case CMD_EXPANDED:
@@ -3058,6 +3072,7 @@ static void Activate(bool forceRaw, bool admin) {
     switch (g_mode) {
     case Mode::Themes: ApplyTheme(g_sel); return;
     case Mode::Fonts: FontActivateSel(); return;
+    case Mode::Caret: CaretApplySel(); return;
     case Mode::Commands:
         if (g_sel >= 0 && g_sel < (int)g_cmdList.size()) RunCommand(g_cmdList[g_sel]);
         return;
@@ -3239,6 +3254,7 @@ static void SetText(const std::wstring& s) {
 
 static void DeleteRange(int a, int b) {
     if (a > b) std::swap(a, b);
+    if (b > a) CaretDeleted(a, b - a);
     g_text.erase(a, b - a);
     g_birth.erase(g_birth.begin() + a, g_birth.begin() + b);
     g_caret = g_anchor = a;
@@ -3251,6 +3267,7 @@ static void InsertText(std::wstring s) {
         if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
     if (HasSel()) DeleteSel();
     double t = Now();
+    if (!s.empty()) CaretTyped(g_caret, (int)s.size());
     g_text.insert(g_caret, s);
     g_birth.insert(g_birth.begin() + g_caret, s.size(), t);
     g_caret += (int)s.size();
@@ -3341,6 +3358,7 @@ static void OnKey(WPARAM vk) {
         return;
     }
     if (g_mode == Mode::Fonts && FontKey(vk, shift)) return;
+    if (g_mode == Mode::Caret && CaretKey(vk, shift)) return;
     switch (vk) {
     case VK_ESCAPE: Dismiss(); break;
     case VK_APPS:  // the keyboard's menu key opens the right-click menu for the selection
@@ -3434,6 +3452,20 @@ static int PinAt(float x, float y) {
     for (const PinHit& p : g_pinHits)
         if (x >= p.r.left && x <= p.r.right && y >= p.r.top && y <= p.r.bottom) return p.pin;
     return -1;
+}
+
+// Dragging the panel's scroll bar: y is the mouse (bar space).
+static void ScrollBarDragTo(float y) {
+    float f = ScrollBarFrac(y);
+    if (g_mode == Mode::Fonts) g_fontGrid.ScrollTo(f * g_fontGrid.MaxOff(), true);
+    else if (g_mode == Mode::Caret) g_caretGrid.ScrollTo(f * g_caretGrid.MaxOff(), true);
+    else if (IsAppList(g_mode) || g_mode == Mode::Commands) {
+        int n = ItemCount(), room = std::max(0, n - Lay::MaxRows);
+        g_listOff = f * room;
+        g_listTop = std::clamp((int)std::lround(g_listOff), 0, room);
+        g_sel = std::clamp(g_sel, g_listTop, std::max(g_listTop, std::min(n - 1, g_listTop + Lay::MaxRows - 1)));
+        RecomputeGhost();
+    }
 }
 
 static int HitItemAt(float x, float y) {
@@ -3643,8 +3675,19 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (x < Margin || x > Margin + BarW || y < Margin || y > Margin + BarH + g_panelH) { Hide(); return 0; }
         if (y > Margin + BarH) {
+            if (ScrollBarHit(x, y)) {  // grab the thumb, or jump to where the track was clicked
+                g_sbDrag = true;
+                g_sbGrab = ScrollBarOnThumb(y) ? y - g_sb.thumbY : g_sb.thumbH / 2;
+                SetCapture(h);
+                ScrollBarDragTo(y);
+                return 0;
+            }
             if (g_mode == Mode::Fonts) {
                 FontClick(x, y);
+                return 0;
+            }
+            if (g_mode == Mode::Caret) {
+                CaretClick(x, y);
                 return 0;
             }
             int idx = HitItemAt(x, y);
@@ -3694,6 +3737,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             for (auto& pp : g_pins) pp.placed = false;
         } else if (g_mode == Mode::Fonts) {
             FontWheel(steps);
+        } else if (g_mode == Mode::Caret) {
+            CaretWheel(steps);
         } else if (IsAppList(g_mode) || g_mode == Mode::Commands) {
             int n = ItemCount();
             g_listTop = std::clamp(g_listTop + steps * 3, 0, std::max(0, n - Lay::MaxRows));
@@ -3738,6 +3783,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        if (g_sbDrag) {
+            ScrollBarDragTo(y);
+            return 0;
+        }
         if ((wp & MK_LBUTTON) && GetCapture() == h) {
             MoveCaret(HitTextIndex(x), true);
             return 0;
@@ -3749,7 +3798,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         g_hoverPin = PinAt(x, y);
         FontHover(x, y);
-        int idx = HitItemAt(x, y);
+        g_sbHot = ScrollBarHit(x, y);
+        int idx = g_sbHot ? -1 : HitItemAt(x, y);
         if (idx >= 0) Select(idx);
         if (!g_trackingLeave) {
             TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, h, 0};
@@ -3762,8 +3812,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_hoverPin = -1;
         g_fontBtnHot = -1;
         g_fontDefaultHot = false;
+        g_sbHot = false;
         return 0;
     case WM_LBUTTONUP: {
+        g_sbDrag = false;
         if (GetCapture() == h) ReleaseCapture();
         if (g_pressPin >= 0) {
             int pin = g_pressPin;
@@ -3791,6 +3843,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : (!g_menuOpen && FontHandAt(x, y)) ? IDC_HAND : IDC_ARROW));
         return TRUE;
     }
+    case WM_CAPTURECHANGED: g_sbDrag = false; break;
     case WM_DPICHANGED: return 0;  // sizing is handled when the bar is shown
     case WM_CLOSE: Hide(); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -3814,6 +3867,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     QueryPerformanceFrequency(&g_qpf);
 
     g_themeIdx = std::clamp((int)ReadDword(L"Theme", 0), 0, kThemeCount - 1);
+    LoadCaretSettings();
     g_expanded = ReadDword(L"Expanded", 1) != 0;
     g_autostart = IsAutoStart();
     g_previewIdx = g_themeIdx;
@@ -3928,6 +3982,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     for (auto& kv : g_localFontFmt) SafeRelease(kv.second);
     SafeRelease(g_fontColl);
     SafeRelease(g_dw);
+    ReleaseFxGeometry();
     SafeRelease(g_d2d);
     if (g_dib) { SelectObject(g_memDC, g_oldBmp); DeleteObject(g_dib); }
     DeleteDC(g_memDC);
