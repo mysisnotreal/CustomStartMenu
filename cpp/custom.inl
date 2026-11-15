@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // Making it yours: "> theme new" (your own theme), "> sounds", "> layout", "> hotkey".
 // ---------------------------------------------------------------------------
 
@@ -81,7 +81,7 @@ static void ThemeEditFill(bool first) {
     r.glyph = L"\xE73E";
     r.title = L"Use this theme";
     r.detail = g_themeIdx == kCustomTheme ? L"In use" : L"";
-    r.action = L"Save  ↵";
+    r.action = L"Save  â†µ";
     r.on = true;
     g_prows.push_back(r);
 }
@@ -114,8 +114,8 @@ static void ThemeEditLeave() {
 
 // ---- sounds: made up on the spot (no files) -------------------------------------------------
 static int g_sndType = 0, g_sndOpen = 0, g_sndVol = 2;
-static const wchar_t* kTypeSounds[] = {L"Off", L"Soft", L"Typewriter", L"Bubble", L"Click"};
-static const wchar_t* kOpenSounds[] = {L"Off", L"Whoosh", L"Chime", L"Pop"};
+static const wchar_t* kTypeSounds[] = {L"Off", L"Soft", L"Typewriter", L"Bubble", L"Click", L"Custom"};
+static const wchar_t* kOpenSounds[] = {L"Off", L"Whoosh", L"Chime", L"Pop", L"Custom"};
 static const wchar_t* kVolumes[] = {L"25%", L"50%", L"75%", L"100%"};
 
 static std::vector<char> MakeWav(const std::vector<float>& s) {
@@ -246,30 +246,60 @@ static void PlaySynth(int kind, int variant = 0) {
     PlaySoundW((LPCWSTR)d.data(), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 static int g_typeVariant = 0;
+// Custom sounds: open.wav and type*.wav in the Sounds folder (next to Fonts)
+static std::wstring SoundsDir() { return KnownFolderPath(FOLDERID_UserProgramFiles) + L"\\CustomStartMenu\\Sounds"; }
+static std::vector<std::wstring> CustomSoundFiles(const wchar_t* prefix) {
+    std::vector<std::wstring> out;
+    std::wstring dir = SoundsDir();
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\" + prefix + L"*.wav").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do out.push_back(dir + L"\\" + fd.cFileName); while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+static bool PlayCustom(const wchar_t* prefix, int n) {
+    auto f = CustomSoundFiles(prefix);
+    if (f.empty()) return false;
+    PlaySoundW(f[n % f.size()].c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    return true;
+}
+static void CustomSoundPicked(const wchar_t* prefix) {
+    std::wstring dir = SoundsDir();
+    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+    if (!PlayCustom(prefix, 0)) {
+        Flash(std::wstring(L"Put ") + prefix + L".wav in the Sounds folder");
+        ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
 static void SoundTyped() {
-    if (g_sndType > 0) PlaySynth(g_sndType, (g_typeVariant++) % 4);
+    if (g_sndType == 5) PlayCustom(L"type", g_typeVariant++);
+    else if (g_sndType > 0) PlaySynth(g_sndType, (g_typeVariant++) % 4);
 }
 static void SoundOpened() {
-    if (g_sndOpen > 0) PlaySynth(10 + g_sndOpen);
+    if (g_sndOpen == 4) PlayCustom(L"open", 0);
+    else if (g_sndOpen > 0) PlaySynth(10 + g_sndOpen);
 }
 static void PlayChime() { PlaySynth(20); }
 static void LoadSoundSettings() {
-    g_sndType = std::clamp((int)ReadDword(L"SoundTyping", 0), 0, 4);
-    g_sndOpen = std::clamp((int)ReadDword(L"SoundOpen", 0), 0, 3);
+    g_sndType = std::clamp((int)ReadDword(L"SoundTyping", 0), 0, 5);
+    g_sndOpen = std::clamp((int)ReadDword(L"SoundOpen", 0), 0, 4);
     g_sndVol = std::clamp((int)ReadDword(L"SoundVolume", 2), 0, 3);
 }
 static std::vector<SettingDef> SoundDefs() {
     return {
-        {L"Typing", L"\xE765", {kTypeSounds, kTypeSounds + 5}, [] { return g_sndType; },
-         [](int v) { g_sndType = v; WriteDword(L"SoundTyping", v); if (v) PlaySynth(v, 1); }},
-        {L"Opening the bar", L"\xE8A7", {kOpenSounds, kOpenSounds + 4}, [] { return g_sndOpen; },
-         [](int v) { g_sndOpen = v; WriteDword(L"SoundOpen", v); if (v) PlaySynth(10 + v); }},
+        {L"Typing", L"\xE765", {kTypeSounds, kTypeSounds + 6}, [] { return g_sndType; },
+         [](int v) { g_sndType = v; WriteDword(L"SoundTyping", v); if (v == 5) CustomSoundPicked(L"type"); else if (v) PlaySynth(v, 1); }},
+        {L"Opening the bar", L"\xE8A7", {kOpenSounds, kOpenSounds + 5}, [] { return g_sndOpen; },
+         [](int v) { g_sndOpen = v; WriteDword(L"SoundOpen", v); if (v == 4) CustomSoundPicked(L"open"); else if (v) PlaySynth(10 + v); }},
         {L"Volume", L"\xE767", {kVolumes, kVolumes + 4}, [] { return g_sndVol; },
          [](int v) {
              g_sndVol = v;
              WriteDword(L"SoundVolume", v);
              SoundClearCache();
-             PlaySynth(g_sndType ? g_sndType : 12, 1);
+             PlaySynth(g_sndType && g_sndType < 5 ? g_sndType : 12, 1);
          }},
     };
 }

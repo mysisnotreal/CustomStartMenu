@@ -182,8 +182,8 @@ pub fn theme_edit_leave() {
 static mut SND_TYPE: i32 = 0;
 static mut SND_OPEN: i32 = 0;
 static mut SND_VOL: i32 = 2;
-const TYPE_SOUNDS: [&str; 5] = ["Off", "Soft", "Typewriter", "Bubble", "Click"];
-const OPEN_SOUNDS: [&str; 4] = ["Off", "Whoosh", "Chime", "Pop"];
+const TYPE_SOUNDS: [&str; 6] = ["Off", "Soft", "Typewriter", "Bubble", "Click", "Custom"];
+const OPEN_SOUNDS: [&str; 5] = ["Off", "Whoosh", "Chime", "Pop", "Custom"];
 const VOLUMES: [&str; 4] = ["25%", "50%", "75%", "100%"];
 use std::f32::consts::PI;
 
@@ -325,10 +325,56 @@ fn play_synth(kind: i32, variant: i32) {
         let _ = PlaySoundW(PCWSTR(d.as_ptr() as *const u16), HMODULE::default(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
     }
 }
+// Custom sounds: open.wav and type*.wav in the Sounds folder (next to Fonts)
+fn sounds_dir() -> String {
+    format!("{}\\CustomStartMenu\\Sounds", games::known_folder_path(&FOLDERID_UserProgramFiles))
+}
+fn custom_sound_files(prefix: &str) -> Vec<String> {
+    let dir = sounds_dir();
+    let mut out: Vec<String> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| {
+                    let l = n.to_lowercase();
+                    l.starts_with(prefix) && l.ends_with(".wav")
+                })
+                .map(|n| format!("{}\\{}", dir, n))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+fn play_custom(prefix: &str, n: i32) -> bool {
+    let f = custom_sound_files(prefix);
+    if f.is_empty() {
+        return false;
+    }
+    let w = ws(&f[n as usize % f.len()]);
+    unsafe {
+        let _ = PlaySoundW(PCWSTR(w.as_ptr()), HMODULE::default(), windows::Win32::Media::Audio::SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    }
+    true
+}
+fn custom_sound_picked(prefix: &str) {
+    let dir = sounds_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if !play_custom(prefix, 0) {
+        flash(&format!("Put {}.wav in the Sounds folder", prefix));
+        let w = ws(&dir);
+        unsafe {
+            ShellExecuteW(None, w!("open"), PCWSTR(w.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        }
+    }
+}
 static mut TYPE_VARIANT: i32 = 0;
 pub fn sound_typed() {
     unsafe {
-        if SND_TYPE > 0 {
+        if SND_TYPE == 5 {
+            play_custom("type", TYPE_VARIANT);
+            TYPE_VARIANT += 1;
+        } else if SND_TYPE > 0 {
             play_synth(SND_TYPE, TYPE_VARIANT % 4);
             TYPE_VARIANT += 1;
         }
@@ -336,7 +382,9 @@ pub fn sound_typed() {
 }
 pub fn sound_opened() {
     unsafe {
-        if SND_OPEN > 0 {
+        if SND_OPEN == 4 {
+            play_custom("open", 0);
+        } else if SND_OPEN > 0 {
             play_synth(10 + SND_OPEN, 0);
         }
     }
@@ -346,8 +394,8 @@ pub fn play_chime() {
 }
 pub fn load_sound_settings() {
     unsafe {
-        SND_TYPE = (read_dword("SoundTyping", 0) as i32).clamp(0, 4);
-        SND_OPEN = (read_dword("SoundOpen", 0) as i32).clamp(0, 3);
+        SND_TYPE = (read_dword("SoundTyping", 0) as i32).clamp(0, 5);
+        SND_OPEN = (read_dword("SoundOpen", 0) as i32).clamp(0, 4);
         SND_VOL = (read_dword("SoundVolume", 2) as i32).clamp(0, 3);
     }
 }
@@ -364,7 +412,9 @@ pub fn sound_defs() -> Vec<SettingDef> {
             set: Box::new(|v| {
                 unsafe { SND_TYPE = v };
                 write_dword("SoundTyping", v as u32);
-                if v != 0 {
+                if v == 5 {
+                    custom_sound_picked("type");
+                } else if v != 0 {
                     play_synth(v, 1);
                 }
             }),
@@ -377,7 +427,9 @@ pub fn sound_defs() -> Vec<SettingDef> {
             set: Box::new(|v| {
                 unsafe { SND_OPEN = v };
                 write_dword("SoundOpen", v as u32);
-                if v != 0 {
+                if v == 4 {
+                    custom_sound_picked("open");
+                } else if v != 0 {
                     play_synth(10 + v, 0);
                 }
             }),
@@ -392,7 +444,7 @@ pub fn sound_defs() -> Vec<SettingDef> {
                 write_dword("SoundVolume", v as u32);
                 sound_clear_cache();
                 let t = unsafe { SND_TYPE };
-                play_synth(if t != 0 { t } else { 12 }, 1);
+                play_synth(if t != 0 && t < 5 { t } else { 12 }, 1);
             }),
         },
     ]

@@ -5,8 +5,8 @@
 3 RCDATA "../res/emoji.txt"      // the emoji in "> emoji"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,5,0,0
-PRODUCTVERSION 1,5,0,0
+FILEVERSION 1,5,1,0
+PRODUCTVERSION 1,5,1,0
 FILETYPE VFT_APP
 BEGIN
     BLOCK "StringFileInfo"
@@ -15,8 +15,8 @@ BEGIN
         BEGIN
             VALUE "FileDescription", "Custom Start (C++ backend)"
             VALUE "ProductName", "Custom Start (CSM)"
-            VALUE "ProductVersion", "1.5.0"
-            VALUE "FileVersion", "1.5.0"
+            VALUE "ProductVersion", "1.5.1"
+            VALUE "FileVersion", "1.5.1"
             VALUE "OriginalFilename", "CSM-cpp.exe"
         END
     END
